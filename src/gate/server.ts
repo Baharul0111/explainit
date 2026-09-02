@@ -162,6 +162,17 @@ export class GateHttpServer {
     if (removed.length) this.log.info(`removed ${removed.length} stale session file(s)`);
     this.token = randomToken();
     const server = http.createServer((req, res) => void this.onRequest(req, res));
+    // A hook script that gives up mid-request (watchdog, agent killed) leaves half-written sockets
+    // behind; late socket errors such as EPIPE/ECONNRESET must never surface as uncaught exceptions.
+    server.on('connection', (socket) => socket.on('error', (e) => this.log.debug('gate socket error', e)));
+    server.on('clientError', (e, socket) => {
+      this.log.debug('gate client error', e);
+      try {
+        socket.destroy();
+      } catch {
+        /* already gone */
+      }
+    });
     server.keepAliveTimeout = 30_000;
     server.headersTimeout = 35_000;
     server.requestTimeout = 60_000;
