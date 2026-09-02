@@ -522,6 +522,13 @@ suite('generation/router', () => {
     });
 
     test('createGenerationRouter + createFileCache + createConsentStore explain util.ts through the fake CLI', async () => {
+      // Codex availability checks for a sign-in file under CODEX_HOME; keep the test hermetic on every machine.
+      const codexHome = path.join(home, 'codex-home');
+      fs.mkdirSync(codexHome, { recursive: true });
+      fs.writeFileSync(path.join(codexHome, 'auth.json'), '{"tokens":{}}');
+      const prevCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = codexHome;
+      try {
       const state = createStateStore(path.join(home, 'state.json'));
       const consentStore = createConsentStore(state);
       const cache = createFileCache(path.join(home, 'cache.json'));
@@ -554,6 +561,10 @@ suite('generation/router', () => {
       assert.ok(fs.existsSync(path.join(home, 'cache.json')));
       assert.ok(fs.existsSync(path.join(home, 'tmp')), 'cwd <home>/tmp was created');
       for (const d of disposables) d.dispose();
+      } finally {
+        if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = prevCodexHome;
+      }
     });
   });
 });

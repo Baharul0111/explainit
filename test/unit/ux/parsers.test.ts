@@ -77,7 +77,7 @@ suite('ux/pure/parsers', () => {
       assert.equal(userHomeDir({}, home, eh), home);
     });
     test('CODEX_HOME wins for the real home', () => {
-      const custom = path.join(path.sep, 'srv', 'codex-home');
+      const custom = path.resolve(path.sep, 'srv', 'codex-home');
       assert.equal(codexHomeDir({ CODEX_HOME: custom }, home, eh), custom);
       assert.equal(codexHomeDir({ CODEX_HOME: `  ${custom}  ` }, home, eh), custom);
     });
@@ -85,9 +85,9 @@ suite('ux/pure/parsers', () => {
       assert.equal(codexHomeDir({ CODEX_HOME: '   ' }, home, eh), path.join(home, '.codex'));
     });
     test('test homes ignore CODEX_HOME like the adapters do (never point tests at the real Codex files)', () => {
-      const custom = path.join(path.sep, 'srv', 'codex-home');
+      const custom = path.resolve(path.sep, 'srv', 'codex-home');
       assert.equal(codexHomeDir({ CODEX_HOME: custom, EXPLAINIT_TEST_MODE: '1' }, home, eh), path.join(eh, 'user-home', '.codex'));
-      const override = path.join(path.sep, 'tmp', 'fake-home');
+      const override = path.resolve(path.sep, 'tmp', 'fake-home');
       assert.equal(codexHomeDir({ CODEX_HOME: custom, EXPLAINIT_USER_HOME: override }, home, eh), path.join(override, '.codex'));
       assert.equal(userHomeDir({ EXPLAINIT_USER_HOME: override }, home, eh), override);
     });
@@ -100,7 +100,7 @@ suite('ux/pure/parsers', () => {
       const p = codexPathsFor({}, home, eh);
       assert.equal(p.hooksJson, `~${path.sep}${path.join('.codex', 'hooks.json')}`);
       assert.equal(p.configToml, `~${path.sep}${path.join('.codex', 'config.toml')}`);
-      const custom = path.join(path.sep, 'srv', 'codex-home');
+      const custom = path.resolve(path.sep, 'srv', 'codex-home');
       const q = codexPathsFor({ CODEX_HOME: custom }, home, eh);
       assert.equal(q.hooksJson, path.join(custom, 'hooks.json'));
       assert.equal(q.configToml, path.join(custom, 'config.toml'));
