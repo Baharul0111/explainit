@@ -217,3 +217,56 @@ runs the tests in a sandboxed Python subprocess, reports pass@1 and style-confor
 without re-running the eval) or if any score in the newest history item is lower than the previous one.
 Style-conformance (deterministic, no model): one-sentence summary, 2-5 steps, length caps, no banned jargon —
 runs in CI against `eval/fixtures/*.json` recorded explanations.
+
+## Factories (what src/extension.ts calls) — implement these exact exports in your module's index.ts
+
+```ts
+// src/structure/index.ts
+export function createStructureEngine(deps: CoreDeps & { router?: () => GenerationRouter | undefined; disposables: Disposable[] }): StructureEngine;
+
+// src/generation/index.ts
+export function createGenerationRouter(deps: CoreDeps & { cache: ExplanationCache; consent: ConsentStore; disposables: Disposable[] }): GenerationRouter;
+export function createFileCache(file: string): ExplanationCache;            // JSON file, debounced flush, capped at 20k entries (LRU)
+export function createConsentStore(state: StateStore): ConsentStore;        // StateStore from src/core/state.ts
+
+// src/twin/index.ts
+export function createTwinEngine(deps: CoreDeps & { structure: StructureEngine; router: GenerationRouter; workspaceFolders: () => string[]; disposables: Disposable[] }): TwinEngine;
+// auto-open + scroll-sync + stale marking on edits are wired inside createTwinEngine (push every vscode disposable into deps.disposables)
+
+// src/gate/index.ts
+export function createGateServer(deps: GateDeps & { safetyFor: (path: string) => SafetyKit | undefined; disposables: Disposable[] }): GateServer;
+
+// src/review/index.ts
+export function createReviewPresenter(deps: CoreDeps & { extensionUri: string; disposables: Disposable[] }): ReviewPresenter;
+export function createDecisionMemory(): DecisionMemory;
+
+// src/journal/index.ts
+export function createSafetyKit(deps: CoreDeps & { folder: string }): SafetyKit;   // one per workspace folder, files under HOME_LAYOUT.workspace(folder)
+export function registerJournalView(deps: CoreDeps & { kits: () => SafetyKit[]; context: vscode.ExtensionContext }): vscode.Disposable; // tree view 'explainit.journalView' with one-click restore
+
+// src/adapters/index.ts
+export function createAdapterManager(deps: CoreDeps & { state: StateStore; gateInfo: () => GateSessionInfo | undefined; disposables: Disposable[] }): AdapterManager;
+export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngine; router: GenerationRouter; twin: TwinEngine; disposables: Disposable[] }): CopilotWatcher;
+
+// src/instructions/index.ts
+export function createInstructionsGenerator(deps: CoreDeps): InstructionsGenerator;
+
+// src/ux/index.ts
+export function createUx(deps: CoreDeps & {
+  context: vscode.ExtensionContext; state: StateStore; structure: StructureEngine; router: GenerationRouter; twin: TwinEngine;
+  gate: GateServer; review: ReviewPresenter; memory: DecisionMemory; safetyFor: (path: string) => SafetyKit | undefined; kits: () => SafetyKit[];
+  adapters: AdapterManager; copilot: CopilotWatcher; instructions: InstructionsGenerator; consent: ConsentStore; disposables: Disposable[];
+}): Ux;   // registers EVERY command from package.json, the status bar, the banner, the status view, onboarding and the doctor
+```
+
+`CoreDeps.logger` is already scoped; call `logger.child('yourmodule')`. `EXPLAINIT_TEST_MODE=1` (env) means: no modal
+dialogs that block (auto-answer using `EXPLAINIT_TEST_ANSWERS` JSON env if present), and the review panel exposes
+`globalThis.__explainitReviewTestHook` so integration tests can drive decisions.
+
+## Integration test access
+
+`src/extension.ts` returns an `ExplainitApi` object from `activate()`; integration tests get it via
+`await vscode.extensions.getExtension('BaharulIslam.explainit')!.activate()` — it exposes every module instance
+(`gate`, `twin`, `router`, `structure`, `adapters`, `ux`, `kits()`, `review`, `memory`, `instructions`, `copilot`,
+`state`, `settings`). `src/core/landing.ts` (`recordLanding` / `landedRecently`) is how the gate tells the Copilot
+watcher and twin staleness logic that a write was gate-approved.
