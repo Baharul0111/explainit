@@ -34,6 +34,9 @@ function request(port: number, method: string, urlPath: string, body?: string, t
       },
     );
     req.on('error', reject);
+    // When the server answers early (413) and closes, the rest of a large body fails with EPIPE on
+    // the bare socket after Node has detached its own listener; that must never be uncaught.
+    req.on('socket', (s) => s.on('error', () => undefined));
     if (body !== undefined) req.write(body);
     req.end();
   });
