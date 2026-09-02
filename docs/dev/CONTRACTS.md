@@ -311,3 +311,5 @@ watcher and twin staleness logic that a write was gate-approved.
   plant misleading explanations.
 - `checkpoint.codexUnresponsive` (`deny` default | `passthrough`): Codex has no `ask`, so on watchdog expiry the hook denies
   with a try-again reason unless the person chose passthrough. Claude Code keeps `ask`.
+- Pinned user-layer config edits (Claude settings, Codex hooks.json/config.toml) whose outcome cannot be replayed onto the
+  current file (old_string absent, apply_patch delete) are denied by the hook mirror; the gate sees them only after that.

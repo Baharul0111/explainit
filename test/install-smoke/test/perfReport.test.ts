@@ -41,7 +41,7 @@ suite('scripts/perf-report', () => {
       '[perf] twin open (cache hit): 42 ms',
       '[perf] first explanation = 1234.5ms',
       'PERF gate-panel 310ms',
-      '  [32m✓[0m opens the twin beside the code (812ms)',
+      '  \x1b[32m✓\x1b[0m opens the twin beside the code (812ms)',
       '  ✓ fast test',
       'random line with 99 ms in it',
     ].join('\n');

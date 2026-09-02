@@ -398,7 +398,19 @@ suite('hook script conformance', function () {
     const hooksJson = await hook(['--agent', 'codex', ...pins], codexPayload('Write', { file_path: path.join(codexHome, 'hooks.json'), content: '{"hooks":{}}' }), spoof);
     assert.strictEqual(parse(hooksJson).hookSpecificOutput.permissionDecision, 'deny', 'CODEX_HOME spoofing does not move hooks.json');
     const toml = await hook(['--agent', 'codex', ...pins], codexPayload('Edit', { file_path: path.join(codexHome, 'config.toml'), old_string: 'a', new_string: 'b' }), spoof);
-    assert.strictEqual(parse(toml).hookSpecificOutput.permissionDecision, 'deny');
+    assert.strictEqual(parse(toml).hookSpecificOutput.permissionDecision, 'deny', 'an edit of the pinned config.toml whose outcome cannot be replayed fails closed');
+    // Pinned user-layer files fail closed for every edit whose result cannot be replayed (a patch that deletes
+    // the file, an old_string that is not there), while a replayable edit that leaves the hook lines alone passes.
+    fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "gpt"\n\n[hooks.state."/h/hooks.json:pre_tool_use:0:0"]\nenabled = true\ntrusted_hash = "sha256:aaaa"\n');
+    const deletePatch = await hook(['--agent', 'codex', ...pins], codexPayload('apply_patch', { command: `*** Begin Patch\n*** Delete File: ${path.join(codexHome, 'config.toml')}\n*** End Patch` }), spoof);
+    assert.strictEqual(parse(deletePatch).hookSpecificOutput.permissionDecision, 'deny', 'deleting the trust record through a patch is refused');
+    const modelOnly = await hook(['--agent', 'codex', ...pins], codexPayload('Edit', { file_path: path.join(codexHome, 'config.toml'), old_string: '"gpt"', new_string: '"gpt-6"' }), spoof);
+    assert.strictEqual(modelOnly.stdout, '', 'a replayable edit that leaves the trust lines alone is not protected (and no session -> nothing)');
+    fs.writeFileSync(path.join(claudeHome, 'settings.json'), JSON.stringify({ model: 'opus', hooks: { PreToolUse: [] } }));
+    const missingOld = await hook(['--agent', 'claude', ...pins], claudePayload('Edit', { file_path: path.join(claudeHome, 'settings.json'), old_string: 'not in the file', new_string: 'x' }), spoof);
+    assert.strictEqual(parse(missingOld).hookSpecificOutput.permissionDecision, 'deny', 'a settings.json edit that cannot be replayed fails closed');
+    const modelEdit = await hook(['--agent', 'claude', ...pins], claudePayload('Edit', { file_path: path.join(claudeHome, 'settings.json'), old_string: '"opus"', new_string: '"sonnet"' }), spoof);
+    assert.strictEqual(modelEdit.stdout, '', 'a replayable settings.json edit that leaves hooks alone is not protected');
     // Shell spelling of the pinned locations is denied too.
     const sh = await hook(['--agent', 'claude', ...pins], claudePayload('Bash', { command: `cp /tmp/x ${path.join(codexHome, 'config.toml')}` }), spoof);
     assert.strictEqual(parse(sh).hookSpecificOutput.permissionDecision, 'deny');

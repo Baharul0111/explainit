@@ -1,19 +1,31 @@
 import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
   EXTENSION_ID,
+  GREET_AFTER,
+  GREET_BEFORE,
+  HOOK_MARK,
   REQUIRED_COMMANDS,
+  REQUIRED_STEPS,
   Report,
   buildUserSettings,
+  changeGreet,
+  checkpointsFor,
+  claudeWritePayload,
   cliInvocation,
   formatMs,
   hasExtension,
+  hookCommandFromSettings,
   installArgs,
+  installedWrapperPath,
   launchArgs,
   listArgs,
+  missingRequiredSteps,
   noVsixMessage,
   parseArgs,
+  parseHookStdout,
   parseListExtensions,
   parseProbeResult,
   pickNewestVsix,
@@ -25,6 +37,7 @@ import {
   hasTwinExcludeEntry,
   jitterMs,
   quoteScriptPath,
+  shellInvocation,
   twinHeaderMatches,
   twinSectionStatus,
   withRetry,
@@ -165,14 +178,15 @@ suite('install-smoke/pure/smoke: fresh profile', () => {
     assert.equal(s.onboardingDone, true);
   });
 
-  test('probeEnv sets test mode, home and probe paths, and strips Electron-as-Node', () => {
-    const env = probeEnv({ PATH: '/bin', ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--x', HOME: '/h' }, { home: '/tmp/home', resultFile: '/tmp/r.json', workspaceDir: '/tmp/ws', repoRoot: '/repo' });
+  test('probeEnv sets test mode, home, the temp user home and probe paths, and strips Electron-as-Node', () => {
+    const env = probeEnv({ PATH: '/bin', ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--x', HOME: '/h' }, { home: '/tmp/home', resultFile: '/tmp/r.json', workspaceDir: '/tmp/ws', repoRoot: '/repo', userHome: '/tmp/user-home' });
     assert.equal(env.PATH, '/bin');
-    assert.equal(env.HOME, '/h');
+    assert.equal(env.HOME, '/h', 'the real HOME is left alone; the hook install goes to EXPLAINIT_USER_HOME');
     assert.equal(env.ELECTRON_RUN_AS_NODE, undefined);
     assert.equal(env.NODE_OPTIONS, undefined);
     assert.equal(env.EXPLAINIT_TEST_MODE, '1');
     assert.equal(env.EXPLAINIT_HOME, '/tmp/home');
+    assert.equal(env.EXPLAINIT_USER_HOME, '/tmp/user-home');
     assert.deepEqual(JSON.parse(env.EXPLAINIT_TEST_ANSWERS!), { consent: 'Allow' });
     assert.equal(env.EXPLAINIT_SMOKE_RESULT, '/tmp/r.json');
     assert.equal(env.EXPLAINIT_SMOKE_WORKSPACE, '/tmp/ws');
@@ -265,7 +279,7 @@ suite('install-smoke/pure/smoke: arguments', () => {
     // `vsix` is checked first: assert.deepEqual narrows `a` to the literal's type afterwards.
     assert.equal(a.vsix, undefined);
     assert.deepEqual(a, { keep: false, version: 'stable', timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, help: false, unknown: [] });
-    assert.equal(DEFAULT_PROBE_TIMEOUT_MS, 180000);
+    assert.equal(DEFAULT_PROBE_TIMEOUT_MS, 300000, 'five minutes: the two checkpoint round trips add about a minute to the twin steps');
   });
 
   test('flags and environment', () => {
@@ -421,5 +435,143 @@ suite('install-smoke/pure/smoke: twin content checks', () => {
     assert.equal(hasTwinExcludeEntry('# *_explain.txt\n'), false);
     assert.equal(hasTwinExcludeEntry(undefined), false);
     assert.equal(hasTwinExcludeEntry(''), false);
+  });
+});
+
+suite('install-smoke/pure/smoke: checkpoint round trip through the installed hook', () => {
+  const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
+  const probeSource = fs.readFileSync(path.join(REPO_ROOT, 'test', 'install-smoke', 'probe', 'extension.js'), 'utf8');
+
+  test('REQUIRED_STEPS name every step the probe records, and the probe carries each name verbatim', () => {
+    assert.ok(REQUIRED_STEPS.length >= 11, 'the checkpoint steps (hook install, reject, accept) are required');
+    for (const name of REQUIRED_STEPS) {
+      assert.ok(probeSource.includes(JSON.stringify(name).slice(1, -1)) || probeSource.includes(name), `probe/extension.js does not carry the step "${name}"`);
+    }
+    // The probe's step constants are all in REQUIRED_STEPS (nothing is quietly added on one side only).
+    const probeSteps = [...probeSource.matchAll(/^const STEP_[A-Z_]+ = '((?:[^'\\]|\\.)*)';$/gm)].map((m) => m[1].replace(/\\'/g, "'"));
+    assert.deepEqual(probeSteps, REQUIRED_STEPS);
+    assert.ok(REQUIRED_STEPS.some((s) => /Claude Code hook installs/.test(s)));
+    assert.ok(REQUIRED_STEPS.some((s) => /denied when the person rejects it/.test(s) && /app\.py is unchanged/.test(s)));
+    assert.ok(REQUIRED_STEPS.some((s) => /allowed when the person accepts it/.test(s) && /restore point/.test(s)));
+  });
+
+  test('the probe copies of the pure helpers are kept in step (same function bodies)', () => {
+    // twinSectionStatus, hookCommandFromSettings, shellInvocation, parseHookStdout and claudeWritePayload
+    // exist twice: here (typed, unit-tested) and in the probe (plain JS, no build step).
+    for (const fn of ['twinSectionStatus', 'hookCommandFromSettings', 'shellInvocation', 'parseHookStdout', 'claudeWritePayload', 'runHook', 'roundTrip']) {
+      assert.ok(new RegExp(`function ${fn}\\(`).test(probeSource), `probe/extension.js has no function ${fn}`);
+    }
+    assert.ok(probeSource.includes("api.adapters.install('claude')"), 'the probe installs the hook through the installed extension API');
+    assert.ok(probeSource.includes('__explainitReviewTestHook'), 'the probe drives the review through the test hook');
+    assert.ok(probeSource.includes('waitForExplained()'), 'accept waits for the explanation, as the person must');
+    assert.ok(probeSource.includes("decide('reject', REJECT_REASON)"), 'reject carries the person\'s words');
+    assert.ok(probeSource.includes(`REJECT_REASON = 'keep it'`));
+    assert.ok(probeSource.includes(`GREET_BEFORE = '${GREET_BEFORE}'`) && probeSource.includes(`GREET_AFTER = '${GREET_AFTER}'`), 'same one-line change to greet()');
+  });
+
+  test('missingRequiredSteps names what the probe never recorded (a failed step is present, not missing)', () => {
+    assert.deepEqual(missingRequiredSteps(undefined, ['a', 'b']), ['a', 'b']);
+    assert.deepEqual(missingRequiredSteps({ ok: false, steps: [{ name: 'a', ok: false }] }, ['a', 'b']), ['b']);
+    assert.deepEqual(missingRequiredSteps({ ok: true, steps: [{ name: 'a', ok: true }, { name: 'b', ok: true }, { name: 'extra', ok: true }] }, ['a', 'b']), []);
+    const all = missingRequiredSteps({ ok: true, steps: REQUIRED_STEPS.map((name) => ({ name, ok: true })) });
+    assert.deepEqual(all, []);
+    const stoppedEarly = missingRequiredSteps({ ok: false, steps: REQUIRED_STEPS.slice(0, 8).map((name) => ({ name, ok: true })) });
+    assert.equal(stoppedEarly.length, 3);
+    assert.ok(stoppedEarly.every((s) => /hook/i.test(s)), stoppedEarly.join(' | '));
+  });
+
+  test('installedWrapperPath: .sh on POSIX, .cmd on Windows, inside <home>/hooks', () => {
+    assert.equal(installedWrapperPath('/tmp/h', 'darwin'), path.join('/tmp/h', 'hooks', 'explainit-hook.sh'));
+    assert.equal(installedWrapperPath('/tmp/h', 'linux'), path.join('/tmp/h', 'hooks', 'explainit-hook.sh'));
+    assert.equal(installedWrapperPath('C:\\x\\h', 'win32'), path.join('C:\\x\\h', 'hooks', 'explainit-hook.cmd'));
+  });
+
+  test('hookCommandFromSettings finds the PreToolUse command ExplainIT wrote (not the PostToolUse one) and reports problems in plain English', () => {
+    const settings = {
+      other: true,
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo theirs' }] },
+          { matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash', hooks: [{ type: 'command', command: "'/h/hooks/explainit-hook.sh' --agent claude --watchdog 120 --home '/h' --claude-home '/u/.claude' --codex-home '/u/.codex'", timeout: 7200 }] },
+        ],
+        PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: "'/h/hooks/explainit-hook.sh' --agent claude --event PostToolUse --home '/h'", timeout: 10 }] }],
+      },
+    };
+    const found = hookCommandFromSettings(JSON.stringify(settings));
+    assert.equal(found.problem, undefined);
+    assert.ok(found.command!.includes(HOOK_MARK) && found.command!.includes('--home') && !found.command!.includes('PostToolUse'), found.command);
+    // The PostToolUse spelling in the PreToolUse list is skipped too.
+    const onlyPost = { hooks: { PreToolUse: [{ hooks: [{ command: '/h/hooks/explainit-hook.sh --agent claude --event PostToolUse' }] }] } };
+    assert.match(hookCommandFromSettings(JSON.stringify(onlyPost)).problem!, /no PreToolUse entry whose command contains "explainit-hook"/);
+    assert.match(hookCommandFromSettings(undefined).problem!, /does not exist/);
+    assert.match(hookCommandFromSettings('{oops').problem!, /not valid JSON/);
+    assert.match(hookCommandFromSettings('{}').problem!, /no hooks\.PreToolUse list/);
+    assert.match(hookCommandFromSettings('{"hooks":{"PreToolUse":[{"hooks":"nope"},{"hooks":[{"command":"other"}]}]}}').problem!, /no PreToolUse entry/);
+  });
+
+  test('shellInvocation runs the command line the way the agents do: sh -c on POSIX, cmd.exe /d /s /c verbatim on Windows', () => {
+    const cmd = "'/h/hooks/explainit-hook.sh' --agent claude --home '/h'";
+    assert.deepEqual(shellInvocation(cmd, 'darwin'), { command: 'sh', args: ['-c', cmd], windowsVerbatimArguments: false });
+    assert.deepEqual(shellInvocation(cmd, 'linux'), { command: 'sh', args: ['-c', cmd], windowsVerbatimArguments: false });
+    const win = shellInvocation('"C:\\h\\hooks\\explainit-hook.cmd" --agent claude', 'win32', 'C:\\Windows\\system32\\cmd.exe');
+    assert.deepEqual(win, { command: 'C:\\Windows\\system32\\cmd.exe', args: ['/d', '/s', '/c', '""C:\\h\\hooks\\explainit-hook.cmd" --agent claude"'], windowsVerbatimArguments: true });
+    assert.equal(shellInvocation('x', 'win32', '  ').command, 'cmd.exe');
+    assert.equal(shellInvocation('x', 'win32').command, 'cmd.exe');
+  });
+
+  test('claudeWritePayload has the shape Claude Code sends on stdin for a Write', () => {
+    const p = claudeWritePayload({ cwd: '/ws', filePath: '/ws/src/app.py', content: 'x = 1\n', sessionId: 's1', toolUseId: 'toolu_1' });
+    assert.equal(p.hook_event_name, 'PreToolUse');
+    assert.equal(p.tool_name, 'Write');
+    assert.equal(p.session_id, 's1');
+    assert.equal(p.tool_use_id, 'toolu_1');
+    assert.equal(p.cwd, '/ws');
+    assert.equal(p.permission_mode, 'default');
+    assert.deepEqual(p.tool_input, { file_path: '/ws/src/app.py', content: 'x = 1\n' });
+    assert.equal(p.transcript_path, path.join('/ws', '.transcript.jsonl'));
+    assert.doesNotThrow(() => JSON.stringify(p));
+  });
+
+  test('changeGreet changes exactly one line of greet() and refuses a fixture without it', () => {
+    const appPy = fs.readFileSync(path.join(REPO_ROOT, 'test', 'fixtures', 'workspace', 'src', 'app.py'), 'utf8');
+    const after = changeGreet(appPy);
+    assert.ok(after, 'the fixture app.py has the greet() line the smoke test changes');
+    assert.ok(after!.includes(GREET_AFTER) && !after!.includes(GREET_BEFORE));
+    const diff = appPy.split('\n').filter((l, i) => after!.split('\n')[i] !== l);
+    assert.equal(diff.length, 1, 'one line differs');
+    assert.equal(changeGreet('def greet():\n    return 1\n'), undefined);
+    assert.equal(changeGreet(undefined), undefined);
+    assert.equal(changeGreet(''), undefined);
+  });
+
+  test('parseHookStdout reads the Claude Code hook JSON and treats silence or junk as a problem', () => {
+    const deny = parseHookStdout(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Rejected by the person: keep it' } }) + '\n');
+    assert.deepEqual(deny, { decision: 'deny', reason: 'Rejected by the person: keep it' });
+    const allow = parseHookStdout('{"hookSpecificOutput":{"permissionDecision":"allow"}}');
+    assert.deepEqual(allow, { decision: 'allow', reason: undefined });
+    assert.equal(parseHookStdout('{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":1}}').decision, 'ask');
+    assert.match(parseHookStdout('').problem!, /printed nothing/);
+    assert.match(parseHookStdout(undefined).problem!, /printed nothing/);
+    assert.match(parseHookStdout('   \n').problem!, /printed nothing/);
+    assert.match(parseHookStdout('Error: boom').problem!, /not JSON/);
+    assert.match(parseHookStdout('{"decision":"deny"}').problem!, /no permissionDecision/);
+    assert.match(parseHookStdout('{"hookSpecificOutput":{"permissionDecision":"maybe"}}').problem!, /no permissionDecision/);
+  });
+
+  test('checkpointsFor lists the restore points recorded for a file name in a checkpoints index', () => {
+    const index = JSON.stringify([
+      { id: 'c1', path: '/ws/src/app.py', ts: '2026-09-02T00:00:00.000Z', contentHash: 'x', size: 1 },
+      { id: 'c2', path: '/ws/src/util.ts', ts: '2026-09-02T00:00:01.000Z', contentHash: 'y', size: 1 },
+      { id: 'c3', path: 'C:\\ws\\src\\app.py', ts: '2026-09-02T00:00:02.000Z', contentHash: 'z', size: 1 },
+      null,
+      { id: 'c4' },
+    ]);
+    const cps = checkpointsFor(index, 'app.py');
+    // path.basename only understands backslashes on Windows, exactly like the store that wrote the index.
+    assert.deepEqual(cps.map((c) => c.id), process.platform === 'win32' ? ['c1', 'c3'] : ['c1']);
+    assert.deepEqual(checkpointsFor(index, 'nope.py'), []);
+    assert.deepEqual(checkpointsFor(undefined, 'app.py'), []);
+    assert.deepEqual(checkpointsFor('{not json', 'app.py'), []);
+    assert.deepEqual(checkpointsFor('{"id":"c1"}', 'app.py'), [], 'the index is an array');
   });
 });

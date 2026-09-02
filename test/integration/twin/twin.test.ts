@@ -165,6 +165,9 @@ suite('twin engine (integration)', function () {
       const doc = await vscode.workspace.openTextDocument(util);
       await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
       await waitFor(() => !!visibleEditorFor(twinPath), 15_000, 'auto-opened twin');
+      // The provisional twin opens before the explanation call finishes; wait for the run to settle
+      // before counting model calls, otherwise the auto-open's own call is mistaken for a new one.
+      await waitFor(() => router.explain.callCount >= 1 && !fs.readFileSync(twinPath, 'utf8').includes('(explaining'), 15_000, 'auto-open run settled');
       assert.notStrictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, twinPath, 'auto-open must not steal the focus');
       const before = router.explain.callCount;
       // Clicking into the twin must not open a twin of the twin.

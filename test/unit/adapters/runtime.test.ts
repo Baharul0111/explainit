@@ -108,15 +108,20 @@ suite('adapters/runtime', () => {
     try {
       const w = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'));
       assert.strictEqual(w.sh.path, path.join(dir, 'explainit-hook.sh'));
+      assert.strictEqual(w.cmd.path, path.join(dir, 'explainit-hook.cmd'));
       // The home defaults to the parent of the hooks folder and is pinned into both wrappers.
       assert.ok(fs.readFileSync(w.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.dirname(dir)}"`));
       assert.ok(fs.readFileSync(w.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.dirname(dir)}"`));
-      const pinned = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'), path.join(dir, 'other-home'));
-      assert.ok(fs.readFileSync(pinned.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.join(dir, 'other-home')}"`));
-      assert.strictEqual(w.cmd.path, path.join(dir, 'explainit-hook.cmd'));
       assert.strictEqual(sha256(fs.readFileSync(w.sh.path)), w.sh.hash);
       assert.strictEqual(sha256(fs.readFileSync(w.cmd.path)), w.cmd.hash);
       if (process.platform !== 'win32') assert.ok(fs.statSync(w.sh.path).mode & 0o100, 'sh wrapper is executable');
+      // An explicit home is pinned instead, and the returned hashes follow the new content.
+      const pinned = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'), path.join(dir, 'other-home'));
+      assert.ok(fs.readFileSync(pinned.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.join(dir, 'other-home')}"`));
+      assert.ok(fs.readFileSync(pinned.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.join(dir, 'other-home')}"`));
+      assert.strictEqual(sha256(fs.readFileSync(pinned.sh.path)), pinned.sh.hash);
+      assert.strictEqual(sha256(fs.readFileSync(pinned.cmd.path)), pinned.cmd.hash);
+      assert.notStrictEqual(pinned.sh.hash, w.sh.hash, 'the pinned home is part of the wrapper hash');
       assert.ok(!fs.readdirSync(dir).some((f) => f.endsWith('.tmp')), 'no temp files left behind');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

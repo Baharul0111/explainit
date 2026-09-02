@@ -3,7 +3,10 @@
  * EXPLAINIT_REAL_AGENTS=1, because it drives the REAL `claude` and `codex` on this machine (both
  * must be signed in) and spends assistant credits.
  *
- * What it proves, against a stub gate on 127.0.0.1 and a temp EXPLAINIT_HOME:
+ * What it proves, against a stub gate on 127.0.0.1, a temp ExplainIT home and a temp USER home:
+ *   - the shipped installer (ClaudeAdapter / CodexAdapter, the same code "ExplainIT: Connect" runs)
+ *     writes user-layer files (<user home>/.claude/settings.json, <user home>/.codex/hooks.json) whose
+ *     pinned commands arm the real binaries: the hook runs, contacts the gate and honours its answer,
  *   - a deny(reason) from the gate leaves hello.py unchanged and the gate saw PreToolUse + tool_input,
  *   - an allow lets the same edit land,
  * for the claude CLI, the codex CLI, AND the binaries bundled inside the Claude Code / Codex VS Code
@@ -13,19 +16,22 @@
  * ExplainIT's Doctor computes is the one the real engine reports through `hooks/list`, and that a
  * `[hooks.state]` record written in ExplainIT's format makes the engine report the hook as trusted.
  *
+ * The child processes get HOME / USERPROFILE / CODEX_HOME pointed at the temp user home, so the
+ * person's own ~/.claude and ~/.codex are never read or written. Claude Code keeps its macOS keychain
+ * sign-in, so it still authenticates. Codex keeps its sign-in in <CODEX_HOME>/auth.json, so the
+ * person's auth.json is linked (never copied or printed) into the temp CODEX_HOME.
+ *
  * Commands (macOS, run from the repo root):
  *   npx tsc -p ./ --outDir out-adapters
  *   EXPLAINIT_REAL_AGENTS=1 npx mocha --ui tdd "out-adapters/test/conformance/real-agents.test.js" --timeout 600000
  * The exact agent invocations are:
  *   claude -p "<prompt>" --output-format json --allowedTools Edit,Write,Read --max-turns 6 --no-session-persistence
- *     (hook installed at the project layer for the test: <tmp>/.claude/settings.json)
- *   codex exec --skip-git-repo-check --ephemeral --sandbox workspace-write --dangerously-bypass-hook-trust \
- *         -c 'hooks.PreToolUse=[{matcher="apply_patch|Edit|Write|Bash",hooks=[{type="command",command="<wrapper> --agent codex --watchdog 60",timeout=7200}]}]' \
- *         -c 'hooks.PostToolUse=[...same with --event PostToolUse, timeout=10]' -C <tmp> -o <tmp>/last.txt "<prompt>"
- *     (Codex ignores a project-layer .codex/hooks.json unless the project is trusted in the person's own
- *      ~/.codex/config.toml, which this test must not touch, so the hook is injected as a session-flag layer;
- *      `--dangerously-bypass-hook-trust` is needed because nobody can trust a throwaway hook. The shipped
- *      installer puts the hook in ~/.codex/hooks.json where the person trusts it once.)
+ *     (hooks come from the installer-written <temp HOME>/.claude/settings.json)
+ *   codex exec --skip-git-repo-check --ephemeral --sandbox workspace-write -C <tmp> -o <tmp>/last.txt "<prompt>"
+ *     with CODEX_HOME=<temp HOME>/.codex holding the installer-written hooks.json plus a trust record
+ *     in config.toml. When `hooks/list` confirms that record is honoured, that is all Codex needs. If
+ *     it is not (an older Codex), the hook is injected as `-c hooks.PreToolUse=[...]` session flags
+ *     together with `--dangerously-bypass-hook-trust` instead, as a fallback.
  *   codex app-server  (JSON-RPC over stdio: initialize -> initialized -> hooks/list) with CODEX_HOME=<tmp>
  */
 import * as assert from 'node:assert';
@@ -33,15 +39,21 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ClaudeAdapter } from '../../src/adapters/claude';
+import { CodexAdapter } from '../../src/adapters/codex';
+import { makeAdapterEnv, type AdapterEnv, type HostProbe } from '../../src/adapters/installer';
 import { codexBundledBinary, pickExtensionDir } from '../../src/adapters/pure/extensionDirs';
-import { codexEntrySpecs, findOurEntries } from '../../src/adapters/pure/hookConfig';
-import { codexHookHash, codexHookKey, lookupTrust, parseHookStates } from '../../src/adapters/pure/codexTrust';
+import { codexEntrySpecs, findOurEntries, type FoundEntry } from '../../src/adapters/pure/hookConfig';
+import { codexHookHash, codexHookKey, codexHookStateHeader, lookupTrust, parseHookStates } from '../../src/adapters/pure/codexTrust';
 import { findOnPath } from '../../src/adapters/pure/pathLookup';
 import { shQuote } from '../../src/adapters/pure/wrappers';
-import { resolveNodeRuntime, writeWrappers } from '../../src/adapters/runtime';
-import { decideWith, longPollThen, startStub, writeSession, type StubGate, HOOK_SCRIPT } from './stubGate';
+import { createLogger } from '../../src/core/log';
+import { inMemorySettings } from '../../src/core/settings';
+import { createStateStore } from '../../src/core/state';
+import { decideWith, longPollThen, startStub, writeSession, type StubGate } from './stubGate';
 
 const ENABLED = process.env.EXPLAINIT_REAL_AGENTS === '1';
+const REPO = path.resolve(__dirname, '..', '..', '..');
 const isFile = (p: string): boolean => {
   try {
     return fs.statSync(p).isFile();
@@ -156,17 +168,35 @@ const ORIGINAL = 'def greet(name):\n    return "Hello " + name\n\n\nif __name__ 
 const ALLOW_PROMPT = 'Read hello.py first. Then edit it so that greet returns "Hi " + name instead of "Hello " + name, keeping the existing double quotes. Use your file edit tool (apply_patch / Edit), never a shell command.';
 const DENY_PROMPT = ALLOW_PROMPT + ' If the edit is rejected by a hook or checkpoint, stop immediately and do not retry.';
 
-/** Codex prints these when its stored sign-in no longer works; the person has to run `codex login` themselves. */
+/** Codex prints these when its stored sign-in no longer works or is missing; the person has to run `codex login` themselves. */
 const CODEX_AUTH_RE = /refresh token was revoked|token_revoked|log out and sign in again|401 Unauthorized|not logged in|codex login/i;
 function assertCodexSignedIn(r: Run, label: string): void {
   if (CODEX_AUTH_RE.test(r.stderr) || CODEX_AUTH_RE.test(r.stdout)) {
-    assert.fail(`${label} is not signed in on this machine (Codex reported that its stored sign-in was revoked), so it never ran the edit. Run \`codex login\` in a terminal, then run this suite again. Last stderr: ${r.stderr.trim().split('\n').slice(-2).join(' | ')}`);
+    assert.fail(`${label} is not signed in on this machine (Codex reported that its stored sign-in was revoked or missing), so it never ran the edit. Run \`codex login\` in a terminal, then run this suite again. Last stderr: ${r.stderr.trim().split('\n').slice(-2).join(' | ')}`);
   }
 }
 
 /** TOML basic-string escaping for a value passed through `codex -c key=value`. */
 function tomlString(s: string): string {
   return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+/** The `[hooks.state]` records Codex expects for every ExplainIT entry in `hooksFile`, in the Doctor's own format. */
+function trustRecords(hooksFile: string): string {
+  const root = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+  let real = hooksFile;
+  try {
+    real = fs.realpathSync.native(hooksFile);
+  } catch {
+    /* keep the configured path */
+  }
+  return findOurEntries(root)
+    .map((e: FoundEntry) => {
+      const ev = e.event as 'PreToolUse' | 'PostToolUse';
+      const hash = codexHookHash(ev, e.matcher, { command: e.command, timeout: e.timeout });
+      return `${codexHookStateHeader(real, ev, e.groupIndex, e.handlerIndex)}\nenabled = true\ntrusted_hash = "${hash}"\n`;
+    })
+    .join('\n');
 }
 
 suite('real agents against the ExplainIT hook (EXPLAINIT_REAL_AGENTS=1)', function () {
@@ -180,56 +210,92 @@ suite('real agents against the ExplainIT hook (EXPLAINIT_REAL_AGENTS=1)', functi
 
   let root: string;
   let home: string;
+  let userHome: string;
+  let codexHome: string;
+  let env: AdapterEnv;
   let wrapper: string;
   let stub: StubGate;
+  /** Whether the real Codex honours the trust record the installer's Doctor format describes (decided once by hooks/list). */
+  const trustHonoured = new Map<string, boolean>();
+
   const agentEnv = (): NodeJS.ProcessEnv => {
-    const env: NodeJS.ProcessEnv = { ...process.env, EXPLAINIT_HOME: home };
+    const e: NodeJS.ProcessEnv = { ...process.env, HOME: userHome, USERPROFILE: userHome, CODEX_HOME: codexHome };
+    // The wrapper pins EXPLAINIT_HOME and the command pins --home; the environment must not be needed.
+    delete e.EXPLAINIT_HOME;
     // A nested Claude Code session must not inherit the outer session's markers.
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_ENTRYPOINT;
-    return env;
+    delete e.CLAUDECODE;
+    delete e.CLAUDE_CODE_ENTRYPOINT;
+    return e;
   };
 
   suiteSetup(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'explainit-real-'));
     home = path.join(root, 'home');
-    const hooksDir = path.join(home, 'hooks');
-    fs.mkdirSync(hooksDir, { recursive: true });
-    const script = path.join(hooksDir, 'explainit-hook.js');
-    fs.copyFileSync(HOOK_SCRIPT, script);
-    const w = writeWrappers(hooksDir, resolveNodeRuntime(), script);
-    wrapper = process.platform === 'win32' ? w.cmd.path : w.sh.path;
+    userHome = path.join(root, 'user');
+    codexHome = path.join(userHome, '.codex');
+    fs.mkdirSync(userHome, { recursive: true });
     stub = await startStub();
+
+    // The shipped installer, exactly as "ExplainIT: Connect" runs it, against the temp homes.
+    const probe: HostProbe = { findExtension: () => undefined, copilotModelCount: async () => 0 };
+    const state = createStateStore(path.join(home, 'state.json'));
+    env = makeAdapterEnv({ logger: createLogger([], 'real-agents'), settings: inMemorySettings({ gateWatchdogSeconds: 60 }), extensionPath: REPO, version: 'test' }, state, probe, {
+      explainitHome: home,
+      hooksDir: path.join(home, 'hooks'),
+      userHome,
+    });
+    const claudeInstall = await new ClaudeAdapter(env).install();
+    assert.strictEqual(claudeInstall.ok, true, claudeInstall.detail);
+    const codexInstall = await new CodexAdapter(env).install();
+    assert.strictEqual(codexInstall.ok, true, codexInstall.detail);
+    wrapper = state.read().adapters!.claude!.wrapperPath!;
+    assert.ok(isFile(wrapper), `wrapper written at ${wrapper}`);
+    const claudeSettings = JSON.parse(fs.readFileSync(path.join(userHome, '.claude', 'settings.json'), 'utf8'));
+    assert.strictEqual(findOurEntries(claudeSettings).length, 2, 'installer wrote both Claude entries');
+    for (const e of findOurEntries(claudeSettings)) assert.ok(e.command.includes(`--home ${shQuote(home)}`), `pinned home in ${e.command}`);
+
+    // Codex trust record for the installer-written hooks.json, in the format the Doctor reads back.
+    fs.writeFileSync(path.join(codexHome, 'config.toml'), trustRecords(path.join(codexHome, 'hooks.json')));
+    // Codex keeps its sign-in in <CODEX_HOME>/auth.json: link the person's own file in (never copied, never read here).
+    const realCodexHome = process.env.CODEX_HOME && process.env.CODEX_HOME.trim() ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), '.codex');
+    const realAuth = path.join(realCodexHome, 'auth.json');
+    if (isFile(realAuth)) {
+      try {
+        fs.symlinkSync(realAuth, path.join(codexHome, 'auth.json'));
+      } catch {
+        /* no symlink rights (Windows): Codex will report "not logged in" and the assertion below explains it */
+      }
+    }
   });
   suiteTeardown(async () => {
     await stub.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  const hookCommand = (agent: 'claude' | 'codex'): string => `${shQuote(wrapper)} --agent ${agent} --watchdog 60`;
-
-  /** Codex gets its hooks as a session-flag config layer (see the header for why). */
+  /** Fallback only: Codex gets its hooks as a session-flag config layer when the user-layer trust record is not honoured. */
   function codexHookFlags(): string[] {
-    const pre = hookCommand('codex');
-    const post = `${shQuote(wrapper)} --agent codex --event PostToolUse`;
-    return [
-      '-c',
-      `hooks.PreToolUse=[{matcher="apply_patch|Edit|Write|Bash",hooks=[{type="command",command=${tomlString(pre)},timeout=7200}]}]`,
-      '-c',
-      `hooks.PostToolUse=[{matcher="apply_patch|Edit|Write",hooks=[{type="command",command=${tomlString(post)},timeout=10}]}]`,
-    ];
+    const specs = codexEntrySpecs(shQuote(wrapper), 60, { explainitHome: home, claudeHome: path.join(userHome, '.claude'), codexHome, platform: process.platform });
+    return specs.flatMap((s) => ['-c', `hooks.${s.event}=[{matcher=${tomlString(s.matcher)},hooks=[{type="command",command=${tomlString(s.command)},timeout=${s.timeout}}]}]`]);
+  }
+
+  async function codexTrustHonoured(agent: Agent): Promise<boolean> {
+    const known = trustHonoured.get(agent.binary!);
+    if (known !== undefined) return known;
+    let honoured = false;
+    try {
+      const listed = await codexHooksList(agent.binary!, codexHome, root);
+      const ours = listed.filter((h) => String(h.command).includes('explainit-hook'));
+      honoured = ours.length === 2 && ours.every((h) => h.trustStatus === 'trusted');
+    } catch {
+      honoured = false;
+    }
+    trustHonoured.set(agent.binary!, honoured);
+    return honoured;
   }
 
   function makeProject(agent: Agent): string {
     const proj = fs.mkdtempSync(path.join(root, `${agent.kind}-`));
     fs.writeFileSync(path.join(proj, 'hello.py'), ORIGINAL);
-    if (agent.kind === 'claude') {
-      fs.mkdirSync(path.join(proj, '.claude'));
-      fs.writeFileSync(
-        path.join(proj, '.claude', 'settings.json'),
-        JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash', hooks: [{ type: 'command', command: hookCommand('claude'), timeout: 7200 }] }] } }, null, 2),
-      );
-    }
     fs.rmSync(path.join(home, 'sessions'), { recursive: true, force: true });
     writeSession(home, stub, [proj]);
     return proj;
@@ -239,13 +305,9 @@ suite('real agents against the ExplainIT hook (EXPLAINIT_REAL_AGENTS=1)', functi
     if (agent.kind === 'claude') {
       return run(agent.binary!, ['-p', prompt, '--output-format', 'json', '--allowedTools', 'Edit,Write,Read', '--max-turns', '6', '--no-session-persistence'], proj, agentEnv(), 300000);
     }
-    return run(
-      agent.binary!,
-      ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'workspace-write', '--dangerously-bypass-hook-trust', ...codexHookFlags(), '-C', proj, '-o', path.join(proj, 'last.txt'), prompt],
-      proj,
-      agentEnv(),
-      300000,
-    );
+    const trusted = await codexTrustHonoured(agent);
+    const hookArgs = trusted ? [] : ['--dangerously-bypass-hook-trust', ...codexHookFlags()];
+    return run(agent.binary!, ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'workspace-write', ...hookArgs, '-C', proj, '-o', path.join(proj, 'last.txt'), prompt], proj, agentEnv(), 300000);
   }
 
   function preToolUseSeen(agent: Agent): void {
@@ -295,17 +357,17 @@ suite('real agents against the ExplainIT hook (EXPLAINIT_REAL_AGENTS=1)', functi
         test('reports the trust hash ExplainIT computes for the user-layer hook, and accepts our trust record (hooks/list)', async function () {
           if (!agent.binary) this.skip();
           this.timeout(180000);
-          // A throwaway CODEX_HOME holding exactly what the installer writes to ~/.codex/hooks.json.
-          const codexHome = fs.mkdtempSync(path.join(root, 'codex-home-'));
+          // A throwaway CODEX_HOME holding exactly what the installer writes to ~/.codex/hooks.json, without a trust record.
+          const throwaway = fs.mkdtempSync(path.join(root, 'codex-home-'));
           const proj = fs.mkdtempSync(path.join(root, 'codex-proj-'));
-          const specs = codexEntrySpecs(shQuote(wrapper), 120);
+          const specs = codexEntrySpecs(shQuote(wrapper), 120, { explainitHome: home, claudeHome: path.join(userHome, '.claude'), codexHome: throwaway, platform: process.platform });
           const hooksJson = { hooks: {} as Record<string, unknown[]> };
           for (const s of specs) hooksJson.hooks[s.event] = [{ matcher: s.matcher, hooks: [{ type: 'command', command: s.command, timeout: s.timeout }] }];
-          const hooksFile = path.join(codexHome, 'hooks.json');
+          const hooksFile = path.join(throwaway, 'hooks.json');
           fs.writeFileSync(hooksFile, JSON.stringify(hooksJson, null, 2));
-          fs.writeFileSync(path.join(codexHome, 'config.toml'), '');
+          fs.writeFileSync(path.join(throwaway, 'config.toml'), '');
 
-          const listed = await codexHooksList(agent.binary!, codexHome, proj);
+          const listed = await codexHooksList(agent.binary!, throwaway, proj);
           assert.strictEqual(listed.length, 2, `codex discovered our two entries: ${JSON.stringify(listed)}`);
           const ours = findOurEntries(hooksJson);
           const realHooksFile = fs.realpathSync.native(hooksFile);
@@ -318,17 +380,23 @@ suite('real agents against the ExplainIT hook (EXPLAINIT_REAL_AGENTS=1)', functi
             assert.strictEqual(hit.trustStatus, 'untrusted');
           }
 
-          // Write a [hooks.state] record in the format the Doctor parses; the real engine must now say "trusted".
+          // Write the [hooks.state] records in the format the Doctor parses; the real engine must now say "trusted".
+          const toml = trustRecords(hooksFile);
+          fs.writeFileSync(path.join(throwaway, 'config.toml'), toml);
+          const trusted = await codexHooksList(agent.binary!, throwaway, proj);
           const pre = ours.find((e) => e.event === 'PreToolUse')!;
-          const key = codexHookKey(realHooksFile, 'PreToolUse', pre.groupIndex, pre.handlerIndex);
-          const hash = codexHookHash('PreToolUse', pre.matcher, { command: pre.command, timeout: pre.timeout });
-          const toml = `[hooks.state."${key}"]\nenabled = true\ntrusted_hash = "${hash}"\n`;
-          fs.writeFileSync(path.join(codexHome, 'config.toml'), toml);
-          const trusted = await codexHooksList(agent.binary!, codexHome, proj);
           const preEntry = trusted.find((h) => String(h.command) === pre.command);
           assert.ok(preEntry, 'PreToolUse entry still listed');
           assert.strictEqual(preEntry.trustStatus, 'trusted', JSON.stringify(preEntry));
+          const hash = codexHookHash('PreToolUse', pre.matcher, { command: pre.command, timeout: pre.timeout });
           assert.strictEqual(lookupTrust(parseHookStates(toml), 'PreToolUse', pre.groupIndex, pre.handlerIndex, hash, [hooksFile, realHooksFile]).status, 'trusted', 'the Doctor reads the same record as trusted');
+        });
+
+        test('the installer-written user layer (hooks.json + trust record) is what the exec scenarios ran with', async function () {
+          if (!agent.binary) this.skip();
+          this.timeout(180000);
+          const honoured = await codexTrustHonoured(agent);
+          assert.strictEqual(honoured, true, 'codex reported the installer-written entries in the temp CODEX_HOME as trusted, so the exec scenarios ran without --dangerously-bypass-hook-trust');
         });
       }
     });

@@ -7,8 +7,15 @@
  *  4. Launch VS Code with test/install-smoke/probe as the development extension. The probe waits
  *     for the VSIX-installed ExplainIT, activates it, checks its commands, opens app.py in a
  *     git-initialised copy of the fixture workspace, triggers the twin (fake Claude CLI), checks the
- *     twin and .git/info/exclude, writes a JSON result and quits.
- *  5. Print PASS / FAIL with every check and reason. Exit 1 on failure.
+ *     twin and .git/info/exclude, then installs the Claude Code hook through the installed
+ *     extension's API (into a user home inside the temp profile, never the real ~/.claude), runs the
+ *     installed wrapper with a Claude Code PreToolUse Write payload on stdin twice (rejected: deny with
+ *     the person's reason and app.py untouched; accepted: allow with a restore point saved first),
+ *     writes a JSON result and quits.
+ *  5. After VS Code has quit, re-check what is on disk (twin, exclude file, the hook's settings entry,
+ *     the wrapper, the raw hook stdout the probe recorded, the restore-point index) independently of
+ *     the probe, and fail when a required probe step was never recorded at all.
+ *  6. Print PASS / FAIL with every check and reason. Exit 1 on failure.
  *
  * Every child process is spawned with an argument array and a timeout. Works on Windows paths.
  * Run: npm run test:install   (after npm run package). On Linux CI it runs under xvfb-run.
@@ -24,14 +31,19 @@ import {
   Report,
   USAGE,
   buildUserSettings,
+  checkpointsFor,
   cliInvocation,
   formatMs,
   hasExtension,
+  hookCommandFromSettings,
   installArgs,
+  installedWrapperPath,
   launchArgs,
   listArgs,
+  missingRequiredSteps,
   noVsixMessage,
   parseArgs,
+  parseHookStdout,
   parseListExtensions,
   parseProbeResult,
   pickNewestVsix,
@@ -164,11 +176,14 @@ async function main(): Promise<number> {
   const userDataDir = path.join(tmpRoot, 'user-data');
   const extensionsDir = path.join(tmpRoot, 'extensions');
   const home = path.join(tmpRoot, 'explainit-home');
+  // The installed extension writes ~/.claude/settings.json under here (EXPLAINIT_USER_HOME), so the
+  // smoke test never touches the person's real assistant configuration.
+  const userHome = path.join(tmpRoot, 'user-home');
   const workspaceDir = path.join(tmpRoot, 'workspace');
   const resultFile = path.join(tmpRoot, 'probe-result.json');
   const probeDir = path.join(repoRoot, 'test', 'install-smoke', 'probe');
   const fakeCli = path.join(repoRoot, 'test', 'fixtures', 'fake-cli', 'claude.js');
-  for (const d of [userDataDir, extensionsDir, home]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [userDataDir, extensionsDir, home, userHome]) fs.mkdirSync(d, { recursive: true });
   log(`temp profile: ${tmpRoot}`);
 
   try {
@@ -255,7 +270,7 @@ async function main(): Promise<number> {
     fs.writeFileSync(path.join(userDataDir, 'User', 'settings.json'), JSON.stringify(buildUserSettings(fakeCli), null, 2));
     fs.writeFileSync(path.join(home, 'state.json'), JSON.stringify(seedState(new Date().toISOString()), null, 2));
 
-    const env = probeEnv(process.env, { home, resultFile, workspaceDir, repoRoot });
+    const env = probeEnv(process.env, { home, resultFile, workspaceDir, repoRoot, userHome });
     const launch = launchArgs({ probeDir, userDataDir, extensionsDir, workspaceDir, platform: process.platform });
     log(`launching VS Code (timeout ${formatMs(args.timeoutMs)})`);
     const vs = await run(exe, launch, { env, timeoutMs: args.timeoutMs, echo: process.env.EXPLAINIT_SMOKE_VERBOSE === '1' });
@@ -274,6 +289,10 @@ async function main(): Promise<number> {
     }
     for (const s of probe.result.steps) report.check(s.name, s.ok, s.detail, s.ms);
     if (probe.result.error && !probe.result.steps.some((s) => !s.ok)) report.check('Probe completed without errors', false, probe.result.error);
+    // A step that was never recorded (the probe stopped early, or a step was quietly removed) is a
+    // failure with the step named, never a shorter list of green ticks.
+    const missing = missingRequiredSteps(probe.result);
+    report.check('Every required probe step was recorded', missing.length === 0, missing.length ? `never recorded: ${missing.join('; ')}` : `${probe.result.steps.length} steps`);
     report.check('Probe verdict', probe.result.ok, probe.result.ok ? `VS Code ${probe.result.vscodeVersion ?? '?'}, ExplainIT ${probe.result.extensionVersion ?? '?'}` : probe.result.error ?? 'one or more probe steps failed');
 
     // 5. Independent re-check from outside VS Code, after it quit: what is on disk is what the person keeps.
@@ -285,6 +304,7 @@ async function main(): Promise<number> {
     const excludePath = path.join(workspaceDir, '.git', 'info', 'exclude');
     const excludeText = readIfExists(excludePath);
     report.check('On disk after quit: .git/info/exclude lists *_explain.txt', hasTwinExcludeEntry(excludeText), excludeText === undefined ? `${excludePath} does not exist` : excludePath);
+    checkpointOnDisk(report, probe.result, { home, userHome, appPy: path.join(workspaceDir, 'src', 'app.py') });
     return finish(report);
   } finally {
     if (args.keep || (!report.ok && process.env.EXPLAINIT_SMOKE_KEEP_ON_FAIL === '1')) {
@@ -293,6 +313,43 @@ async function main(): Promise<number> {
       log(`could not remove ${tmpRoot} (a VS Code process may still hold it); delete it by hand`);
     }
   }
+}
+
+/**
+ * The checkpoint round trips, judged again from outside VS Code: the hook entry ExplainIT wrote into
+ * the temp user home's ~/.claude/settings.json, the wrapper it points at, the raw stdout the probe
+ * recorded for the rejected and the accepted Write, and the restore-point index on disk.
+ */
+function checkpointOnDisk(report: Report, probe: { hook?: { reject?: { stdout: string }; accept?: { stdout: string } } }, o: { home: string; userHome: string; appPy: string }): void {
+  const settingsFile = path.join(o.userHome, '.claude', 'settings.json');
+  const entry = hookCommandFromSettings(readIfExists(settingsFile));
+  report.check('On disk after quit: ~/.claude/settings.json in the temp user home carries the ExplainIT PreToolUse hook pinned with --home', !!entry.command && entry.command.includes('--home'), entry.command ?? `${settingsFile}: ${entry.problem}`);
+  const wrapper = installedWrapperPath(o.home, process.platform);
+  report.check('On disk after quit: the installed wrapper exists', fs.existsSync(wrapper), wrapper);
+  const reject = parseHookStdout(probe.hook?.reject?.stdout);
+  report.check(
+    'On disk after quit: the rejected Write got "deny" with the person\'s reason',
+    reject.decision === 'deny' && !!reject.reason && reject.reason.includes('keep it'),
+    reject.problem ?? (probe.hook?.reject ? `${reject.decision}: ${reject.reason ?? '(no reason)'}` : 'the probe recorded no hook output for the rejected Write'),
+  );
+  const accept = parseHookStdout(probe.hook?.accept?.stdout);
+  report.check('On disk after quit: the accepted Write got "allow"', accept.decision === 'allow', accept.problem ?? (probe.hook?.accept ? `${accept.decision}${accept.reason ? `: ${accept.reason}` : ''}` : 'the probe recorded no hook output for the accepted Write'));
+  const cps = restorePointsFor(o.home, path.basename(o.appPy));
+  report.check('On disk after quit: a restore point for app.py is in the checkpoint index', cps.length > 0, cps.length ? `${cps.length} restore point(s), newest ${cps[cps.length - 1].id}` : `no checkpoints/index.json under ${path.join(o.home, 'workspaces')} lists app.py`);
+}
+
+/** Every checkpoints/index.json under <home>/workspaces/<key>/ -> restore points recorded for `fileName`. */
+function restorePointsFor(home: string, fileName: string): { id: string; path: string; ts?: string }[] {
+  const root = path.join(home, 'workspaces');
+  let keys: string[] = [];
+  try {
+    keys = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  const out: { id: string; path: string; ts?: string }[] = [];
+  for (const key of keys) out.push(...checkpointsFor(readIfExists(path.join(root, key, 'checkpoints', 'index.json')), fileName));
+  return out;
 }
 
 function finish(report: Report): number {

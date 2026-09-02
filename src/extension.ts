@@ -16,6 +16,7 @@ import { createGateServer } from './gate';
 import { createReviewPresenter, createDecisionMemory } from './review';
 import { createSafetyKit, registerJournalView } from './journal';
 import { createAdapterManager, createCopilotWatcher } from './adapters';
+import { verifyAndRearmAtStartup } from './adapters/startup';
 import { createInstructionsGenerator } from './instructions';
 import { createUx } from './ux';
 
@@ -119,11 +120,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
   // Session-start integrity check and first-run onboarding, never blocking activation.
   void (async () => {
     try {
-      const report = await adapters.verifyIntegrity();
-      if (!report.ok) {
-        const fixed = await adapters.rearm();
-        logger.warn('adapter integrity problems found at startup', { before: report, after: fixed });
-      }
+      // Goal item 8: the checkpoint verifies its own integrity every session and re-arms if tampered.
+      await verifyAndRearmAtStartup(adapters, logger.child('startup'));
       if (settings.get('instructionsAutoUpdate')) for (const f of workspaceFolders()) await instructions.ensure(f);
       for (const f of workspaceFolders()) await twin.ensureGitExclude(f);
       if (!state.read().onboardingDone) await ux.runOnboarding();

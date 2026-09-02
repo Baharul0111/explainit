@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { Decision } from '../../../src/core/types';
 import { landedRecently } from '../../../src/core/landing';
 import { canonicalPath } from '../../../src/core/paths';
-import { GateController, IngressValidationError, MAX_SOURCE_BYTES, REVIEW_SIZE_CAP, normalizeVerdict } from '../../../src/gate/controller';
+import { GateController, IngressValidationError, MAX_PENDING_PER_SESSION, MAX_SOURCE_BYTES, REVIEW_SIZE_CAP, normalizeVerdict } from '../../../src/gate/controller';
 import { claudeEnvelope, codexEnvelope, makeHarness, type Harness } from './fakes';
 
 const PY = 'def greet(name):\n    return "Hello, " + name\n\n\ndef farewell(name):\n    return "Bye, " + name\n';
@@ -61,9 +61,24 @@ suite('gate/controller', () => {
   });
 
   test('.git/** write -> ask', async () => {
-    const d = await c.handle(claudeEnvelope('Write', { file_path: path.join(h.workspace, '.git', 'hooks', 'pre-commit'), content: '#!/bin/sh' }, h.workspace));
+    const d = await c.handle(claudeEnvelope('Write', { file_path: path.join(h.workspace, '.git', 'refs', 'heads', 'main'), content: 'abc' }, h.workspace));
     assert.equal(d.permissionDecision, 'ask');
     assert.match(d.reason!, /\.git/);
+  });
+
+  test('.git/hooks/** and .git/config writes -> deny, no review (F2)', async () => {
+    for (const rel of [['.git', 'hooks', 'pre-commit'], ['.git', 'config']]) {
+      const d = await c.handle(claudeEnvelope('Write', { file_path: path.join(h.workspace, ...rel), content: '#!/bin/sh' }, h.workspace));
+      assert.equal(d.permissionDecision, 'deny', rel.join('/'));
+      assert.match(d.reason!, /git hook or the git config/);
+    }
+    const config = path.join(h.workspace, '.git', 'config');
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    fs.writeFileSync(config, '[core]\n\tbare = false\n');
+    const edit = await c.handle(claudeEnvelope('Edit', { file_path: config, old_string: 'bare = false', new_string: 'bare = false\n\thooksPath = /tmp/h' }, h.workspace));
+    assert.equal(edit.permissionDecision, 'deny');
+    assert.match(edit.reason!, /git hook or the git config/);
+    assert.equal(h.review.requests.length, 0);
   });
 
   test('write outside every workspace folder -> none', async () => {
@@ -104,6 +119,87 @@ suite('gate/controller', () => {
       assert.equal((await c.handle(codexEnvelope('shell', { command: ['bash', '-lc', 'git status'] }, h.workspace))).permissionDecision, 'none');
       assert.equal((await c.handle(codexEnvelope('shell', { command: ['bash', '-lc', 'echo x > a.py'] }, h.workspace))).permissionDecision, 'deny');
     });
+    test('cd / pushd into a protected folder, and writes resolved against it, are denied in every mode (F4)', async () => {
+      await h.deps.settings.set('gateShellWrites', 'ignore');
+      const cases: [string, RegExp][] = [
+        ['cd ~/.claude && cat > settings.json', /changes into/],
+        ['(cd ~/.explainit/sessions && echo x > 1.json)', /ExplainIT/],
+        ['pushd ~/.codex; tee hooks.json', /changes into/],
+        ['cd .git/hooks && cp ../../evil.sh pre-commit', /\.git\/hooks/],
+        ['cd .git && cp ../evil.sh hooks/pre-commit', /changes into/],
+        ['git config core.hooksPath /tmp/hooks', /core\.hookspath/],
+        ['git config user.name "Someone"', /git hook or the git config/],
+        ['chmod +x .git/hooks/pre-commit', /\.git\/hooks/],
+      ];
+      for (const [command, re] of cases) {
+        const d = await c.handle(claudeEnvelope('Bash', { command }, h.workspace));
+        assert.equal(d.permissionDecision, 'deny', command);
+        assert.match(d.reason!, re, command);
+      }
+      // The Codex argv form is analysed on the inner script, not the space-joined argv.
+      const codex = await c.handle(codexEnvelope('shell', { command: ['bash', '-lc', 'pushd ~/.codex; tee hooks.json'] }, h.workspace));
+      assert.equal(codex.permissionDecision, 'deny');
+      // Running inside the protected folder already: a bare-name redirect is caught by the cwd.
+      const inside = await c.handle(claudeEnvelope('Bash', { command: 'cat > settings.local.json' }, path.join(h.userHome, '.claude')));
+      assert.equal(inside.permissionDecision, 'deny');
+      assert.match(inside.reason!, /Claude Code settings/);
+      // Still benign.
+      assert.equal((await c.handle(claudeEnvelope('Bash', { command: 'cd src && ls' }, h.workspace))).permissionDecision, 'none');
+      assert.equal((await c.handle(claudeEnvelope('Bash', { command: 'git config --get user.name' }, h.workspace))).permissionDecision, 'none');
+    });
+  });
+
+  test('setPaused (either way) clears every "accept the rest" decision (F3)', async () => {
+    c.setPaused(true);
+    assert.equal(h.memory.cleared, 1);
+    c.setPaused(true);
+    assert.equal(h.memory.cleared, 1, 'no change, no clear');
+    c.setPaused(false);
+    assert.equal(h.memory.cleared, 2);
+  });
+
+  test('a request without a session id gets no decision memory: reviewed even when the hunk was accepted before (F3)', async () => {
+    h.setReview(() => decision('accept'));
+    const after = PY.replace('Hello', 'Yo');
+    await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace));
+    h.memory.accepted.add(h.review.requests[0].hunksByPath[file][0].id);
+    const anonymous = claudeEnvelope('Write', { file_path: file, content: after }, h.workspace);
+    delete (anonymous.payload as Record<string, unknown>).session_id;
+    const d = await c.handle(anonymous);
+    assert.deepEqual(d, { permissionDecision: 'allow' });
+    assert.equal(h.review.requests.length, 2, 'a second review was opened instead of trusting memory');
+    assert.equal(h.review.requests[1].sessionId, '');
+    // The same request with the session id is covered.
+    assert.deepEqual(await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace)), { permissionDecision: 'allow' });
+    assert.equal(h.review.requests.length, 2);
+  });
+
+  test('at most 20 reviews per assistant session wait for a human; the next one goes to the agent prompt (F7)', async () => {
+    const release: ((d: Decision) => void)[] = [];
+    h.setReview(() => new Promise<Decision>((r) => release.push(r)));
+    const waitFor = async (pred: () => boolean): Promise<void> => {
+      for (let i = 0; i < 400 && !pred(); i++) await new Promise((r) => setTimeout(r, 5));
+      assert.ok(pred(), 'condition never became true');
+    };
+    const pending = Array.from({ length: MAX_PENDING_PER_SESSION }, (_, i) => c.handle(claudeEnvelope('Write', { file_path: file, content: PY.replace('Hello', `Yo${i}`) }, h.workspace)));
+    await waitFor(() => release.length === MAX_PENDING_PER_SESSION);
+    assert.equal(c.pending, MAX_PENDING_PER_SESSION);
+    const extra = await c.handle(claudeEnvelope('Write', { file_path: file, content: PY.replace('Hello', 'Extra') }, h.workspace));
+    assert.equal(extra.permissionDecision, 'ask');
+    assert.match(extra.reason!, /20 changes/);
+    assert.equal(release.length, MAX_PENDING_PER_SESSION, 'no review was opened for the capped request');
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'proposed').length, MAX_PENDING_PER_SESSION, 'nothing journaled for the capped request');
+    // Another assistant session has its own allowance.
+    const other = claudeEnvelope('Write', { file_path: file, content: PY.replace('Hello', 'Other') }, h.workspace);
+    (other.payload as Record<string, unknown>).session_id = 'sess-other';
+    const otherPending = c.handle(other);
+    await waitFor(() => release.length === MAX_PENDING_PER_SESSION + 1);
+    for (const r of release) r(decision('reject', { reason: 'later' }));
+    for (const p of [...pending, otherPending]) assert.equal((await p).permissionDecision, 'deny');
+    assert.equal(c.pending, 0);
+    // Slots are released: the same session can be reviewed again.
+    h.setReview(() => decision('reject', { reason: 'no' }));
+    assert.equal((await c.handle(claudeEnvelope('Write', { file_path: file, content: PY.replace('Hello', 'Again') }, h.workspace))).permissionDecision, 'deny');
   });
 
   test('Edit with old_string not found -> none (tool fails itself)', async () => {
@@ -282,17 +378,108 @@ suite('gate/controller', () => {
     assert.deepEqual(req.hunksByPath[req.writes[1].path].map((x) => [x.functionName, x.changeType]), [['added', 'added']]);
   });
 
-  test('codex PostToolUse for a patch records a landing for every touched path (moves use the destination)', async () => {
+  test('codex PostToolUse for a patch nobody allowed is only noted (moves are checked at the destination)', async () => {
     const moved = path.join(h.workspace, 'src', 'moved.py');
     fs.writeFileSync(moved, PY);
     const patch = ['*** Begin Patch', '*** Update File: src/app.py', '*** Move to: src/moved.py', '@@', '-x', '+y', '*** End Patch'].join('\n');
+    const d = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace, 'PostToolUse'));
+    assert.deepEqual(d, { permissionDecision: 'none' });
+    assert.equal(landedRecently(canonicalPath(moved)), false);
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'applied').length, 0);
+    const notes = h.safety.entries.filter((e) => e.kind === 'system');
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].path, canonicalPath(moved));
+    assert.match(notes[0].note!, /had not allowed/);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(h.twin.updated, []);
+  });
+
+  test('codex PostToolUse for an accepted patch records a landing for every touched path (moves use the destination)', async () => {
+    h.setReview(() => decision('accept'));
+    const patch = ['*** Begin Patch', '*** Update File: src/app.py', '*** Move to: src/moved.py', '@@ def greet(name):', '-    return "Hello, " + name', '+    return "Hey, " + name', '*** End Patch'].join('\n');
+    const pre = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace));
+    assert.deepEqual(pre, { permissionDecision: 'allow' });
+    const moved = path.join(h.workspace, 'src', 'moved.py');
+    fs.writeFileSync(moved, PY.replace('Hello', 'Hey'));
+    fs.rmSync(file);
     const d = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace, 'PostToolUse'));
     assert.deepEqual(d, { permissionDecision: 'none' });
     assert.ok(landedRecently(canonicalPath(moved)));
     const applied = h.safety.entries.filter((e) => e.kind === 'applied');
     assert.equal(applied.length, 1);
     assert.equal(applied[0].path, canonicalPath(moved));
-    assert.match(applied[0].note!, /unexpected/);
+    assert.match(applied[0].note!, /agent wrote the file; on-disk content match$/);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(h.twin.updated, [canonicalPath(moved)]);
+  });
+
+  test('a forged PostToolUse for a write ExplainIT never allowed is noted in the journal and otherwise ignored (F5)', async () => {
+    const other = path.join(h.workspace, 'src', 'other.py');
+    fs.writeFileSync(other, 'x = 1\n');
+    const d = await c.handle(claudeEnvelope('Write', { file_path: other, content: 'x = 1\n' }, h.workspace, 'PostToolUse'));
+    assert.deepEqual(d, { permissionDecision: 'none' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(landedRecently(canonicalPath(other)), false, 'no landing recorded');
+    assert.deepEqual(h.twin.updated, [], 'no twin regenerated');
+    assert.deepEqual(h.safety.entries.map((e) => e.kind), ['system']);
+    assert.equal(h.safety.entries[0].path, canonicalPath(other));
+    assert.match(h.safety.entries[0].note!, /PostToolUse for a write ExplainIT had not allowed; ignored/);
+    // A second PostToolUse for an allowed write is honoured once; a replay afterwards is noted only.
+    h.setReview(() => decision('accept'));
+    const after = PY.replace('Hello', 'Yo');
+    await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace));
+    fs.writeFileSync(file, after);
+    await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace, 'PostToolUse'));
+    await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace, 'PostToolUse'));
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'applied').length, 1);
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'system').length, 2);
+  });
+
+  test('an allowed twin write is re-rendered by ExplainIT from the source once it lands (F8)', async () => {
+    const twin = path.join(h.workspace, 'src', 'app_explain.txt');
+    const content = 'ExplainIT header\n\n1. greet\nWhat it does: Says hello.\n';
+    const ok = await c.handle(claudeEnvelope('Write', { file_path: twin, content }, h.workspace));
+    assert.deepEqual(ok, { permissionDecision: 'allow' });
+    fs.writeFileSync(twin, content);
+    const post = await c.handle(claudeEnvelope('Write', { file_path: twin, content }, h.workspace, 'PostToolUse'));
+    assert.deepEqual(post, { permissionDecision: 'none' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(h.twin.updated, [file], 'updateAfterChange is called with the SOURCE path, never the twin');
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'applied').length, 0, 'a twin write is not an applied code change');
+    const notes = h.safety.entries.filter((e) => e.kind === 'system');
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].path, canonicalPath(twin));
+    assert.equal(notes[0].note, 'twin written by an assistant; re-rendered by ExplainIT');
+  });
+
+  test('partial acceptance refuses to write when the path became a symbolic link during the review (F10)', async function () {
+    const outside = path.join(h.root, 'outside.py');
+    fs.writeFileSync(outside, PY);
+    const after = PY.replace('"Hello, "', '"Hi, "').replace('"Bye, "', '"Ciao, "');
+    let linked = false;
+    h.setReview((req) => {
+      // Between the review and the write, the file is swapped for a link to a file outside the workspace
+      // that carries the same content, so the "changed on disk" check alone would not notice.
+      fs.rmSync(file);
+      try {
+        fs.symlinkSync(outside, file, 'file');
+        linked = true;
+      } catch {
+        fs.writeFileSync(file, PY);
+      }
+      const hv: Record<string, 'accept' | 'reject'> = {};
+      for (const x of req.hunksByPath[req.writes[0].path]) hv[x.id] = x.functionName === 'greet' ? 'accept' : 'reject';
+      return decision('partial', { hunkVerdicts: hv, reason: 'no' });
+    });
+    const d = await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace));
+    if (!linked) this.skip();
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /moved while the review was open/);
+    assert.match(d.reason!, /symbolic link/);
+    assert.equal(fs.readFileSync(outside, 'utf8'), PY, 'the link target was not written');
+    assert.equal(h.safety.entries.filter((e) => e.kind === 'applied').length, 0);
+    assert.match(h.safety.entries[h.safety.entries.length - 1].note!, /path changed during the review/);
+    assert.deepEqual(h.twin.updated, []);
   });
 
   test('malformed codex apply_patch -> deny with a format hint', async () => {
@@ -380,14 +567,14 @@ suite('gate/controller', () => {
     assert.deepEqual(h.twin.updated, []);
   });
 
-  test('PostToolUse for a twin file never asks the twin engine to regenerate from the twin', async () => {
+  test('PostToolUse for a twin file nobody allowed never asks the twin engine to regenerate anything', async () => {
     const twin = path.join(h.workspace, 'src', 'app_explain.txt');
     fs.writeFileSync(twin, 'ExplainIT header\n\n1. greet\nWhat it does: Says hello.\n');
     const d = await c.handle(claudeEnvelope('Write', { file_path: twin, content: 'x' }, h.workspace, 'PostToolUse'));
     assert.deepEqual(d, { permissionDecision: 'none' });
     await new Promise((r) => setTimeout(r, 10));
     assert.deepEqual(h.twin.updated, []);
-    assert.equal(h.safety.entries.length, 0);
+    assert.deepEqual(h.safety.entries.map((e) => e.kind), ['system'], 'only a note that it was ignored');
   });
 
   test('Edit whose old_string spans CRLF text on a CRLF file is reviewed with CRLF kept in the proposal', async () => {

@@ -7,13 +7,14 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import type { StructureEngine } from '../../../src/core/interfaces';
+import type { AiSegment, GenerationRouter, StructureEngine } from '../../../src/core/interfaces';
 import type { FunctionMap } from '../../../src/core/types';
 import { resolveWasmDir, TreeSitterService } from '../../../src/structure/pure/treeSitter';
 import type { StructureTestHooks } from '../../../src/structure';
 
-type Api = { structure: StructureEngine & { __test?: StructureTestHooks } };
+type Api = { structure: StructureEngine & { __test?: StructureTestHooks }; router: GenerationRouter };
 
 const workspaceRoot = (): string => vscode.workspace.workspaceFolders![0].uri.fsPath;
 const fixturePath = (rel: string): string => path.join(workspaceRoot(), ...rel.split('/'));
@@ -135,6 +136,43 @@ suite('structure engine (integration)', function () {
     const map = await api.structure.getFunctionMap({ uri: doc.uri.toString(), languageId: doc.languageId, getText: () => doc.getText() });
     assert.ok(Date.now() - started < 1500);
     assert.equal(map.functions.length, 0);
+  });
+
+  test('AI segmentation (REQ-012) runs only when the caller allows it, and its answer becomes an "ai" map', async () => {
+    // Fortran: no symbol provider in the test host, no tree-sitter grammar, no heuristic keyword.
+    const text = 'subroutine foo(x)\n  integer :: x\n  x = x + 1\nend subroutine foo\n\nsubroutine bar(y)\n  y = 0\nend subroutine bar\n';
+    const uriHint = vscode.Uri.file(fixturePath('legacy/not-on-disk.f90')).toString();
+    assert.ok(!api.structure.treeSitterLanguages().includes('fortran'));
+    const segments: AiSegment[] = [
+      { name: 'foo', startLine: 0, endLine: 3 },
+      { name: 'bar', startLine: 5, endLine: 7 },
+      { name: '', startLine: 0, endLine: 1 }, // nonsense from the model is dropped
+      { name: 'beyond', startLine: 40, endLine: 50 },
+    ];
+    const sandbox = sinon.createSandbox();
+    const segment = sandbox.stub(api.router, 'segmentWithAi').resolves(segments);
+    try {
+      const silent = await api.structure.getFunctionMapForText(text, 'fortran', uriHint);
+      assert.equal(silent.source, 'none', 'without allowAi nothing may spend credits');
+      assert.equal(silent.functions.length, 0);
+      assert.equal(segment.callCount, 0, 'segmentWithAi must not be called unless allowAi is set');
+
+      const map = await api.structure.getFunctionMapForText(text, 'fortran', uriHint, { allowAi: true });
+      assert.equal(segment.callCount, 1);
+      const req = segment.firstCall.args[0] as { fileName: string; languageId: string; text: string };
+      assert.deepEqual([req.fileName, req.languageId, req.text], ['not-on-disk.f90', 'fortran', text]);
+      assert.equal(map.source, 'ai');
+      assert.deepEqual(map.functions.map((f) => [f.name, f.range.startLine, f.range.endLine, f.source]), [['foo', 0, 3, 'ai'], ['bar', 5, 7, 'ai']]);
+      for (const f of map.functions) assert.equal(f.contentHash.length, 64);
+
+      // A failing assistant degrades to "none" instead of throwing.
+      segment.rejects(new Error('The assistant did not answer.'));
+      const failed = await api.structure.getFunctionMapForText(text, 'fortran', uriHint, { allowAi: true });
+      assert.equal(failed.source, 'none');
+      assert.equal(failed.functions.length, 0);
+    } finally {
+      sandbox.restore();
+    }
   });
 
   test('an empty document yields an empty map without touching any provider', async () => {

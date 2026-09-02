@@ -213,7 +213,7 @@ suite('scripts/check-vsix: content checks', () => {
   test('too many files or too many megabytes is a problem even when every file looks fine', () => {
     const many = entries([...GOOD, ...Array.from({ length: 500 }, (_, i) => `extension/media/x${i}.svg`)]);
     const r = checker.checkEntries(many);
-    assert.ok(r.problems.some((p) => /510 files in the package/.test(p)), r.problems.join('\n'));
+    assert.ok(r.problems.some((p) => new RegExp(`${GOOD.length + 500} files in the package`).test(p)), r.problems.join('\n'));
     assert.equal(checker.checkEntries(many, { maxFiles: 1000 }).ok, true);
     const big = checker.checkEntries(entries(GOOD, 20 * 1024 * 1024));
     assert.ok(big.problems.some((p) => /MB uncompressed; more than 120 MB/.test(p)), big.problems.join('\n'));

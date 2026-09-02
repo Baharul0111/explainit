@@ -36,9 +36,59 @@ export interface ShellContext {
   cwd?: string;
   /** The person's home directory, for `~`, `$HOME` and `%USERPROFILE%` spellings. */
   home?: string;
+  /** ExplainIT home, for `$EXPLAINIT_HOME` spellings. */
+  explainitHome?: string;
+  /** Codex home, for `$CODEX_HOME` spellings. */
+  codexHome?: string;
 }
 
 const SEGMENT_SPLIT = /\s*(?:&&|\|\||;|\||\n)\s*/;
+
+/**
+ * Split a command line into simple segments on `&&`, `||`, `;`, `|` and newlines that sit OUTSIDE
+ * quotes, so `bash -c "cd ~/.claude && cat > settings.json"` stays one segment and its inner script
+ * is analysed as a whole (with its own cd tracking). When the quotes do not balance the naive split
+ * is used instead: a stray apostrophe must never hide the commands after it.
+ */
+export function splitSegments(command: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      cur += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < command.length) cur += command[++i];
+      else if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      cur += ch + command[++i];
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === '&&' || two === '||') {
+      out.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    if (ch === ';' || ch === '|' || ch === '\n') {
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  if (quote) return command.split(SEGMENT_SPLIT).filter((s) => s.trim());
+  return out.map((s) => s.trim()).filter(Boolean);
+}
 
 /** Tokenise a shell segment: whitespace-separated, quotes grouped, quotes stripped. */
 export function tokenize(segment: string): string[] {
@@ -113,21 +163,56 @@ function stripPrefixes(tokens: string[]): string[] {
   return out;
 }
 
-function expandHome(tok: string, home: string | undefined): string {
-  if (!home) return tok;
-  return tok
-    .replace(/^~(?=$|[\\/])/, home)
-    .replace(/^\$\{?HOME\}?(?=$|[\\/])/, home)
-    .replace(/^%USERPROFILE%(?=$|[\\/])/i, home);
+/** The spellings a shell would expand for the home directories we know (same set as the hook script). */
+function expandHome(tok: string, ctx: ShellContext): string {
+  let t = tok;
+  if (ctx.home) {
+    t = t
+      .replace(/^~(?=$|[\\/])/, ctx.home)
+      .replace(/^\$\{?HOME\}?(?=$|[\\/])/, ctx.home)
+      .replace(/^%(USERPROFILE|HOME)%(?=$|[\\/])/i, ctx.home);
+  }
+  if (ctx.explainitHome) t = t.replace(/^\$\{?EXPLAINIT_HOME\}?(?=$|[\\/])/, ctx.explainitHome).replace(/^%EXPLAINIT_HOME%(?=$|[\\/])/i, ctx.explainitHome);
+  if (ctx.codexHome) t = t.replace(/^\$\{?CODEX_HOME\}?(?=$|[\\/])/, ctx.codexHome).replace(/^%CODEX_HOME%(?=$|[\\/])/i, ctx.codexHome);
+  return t;
 }
 
 const WIN_ABS = /^[a-zA-Z]:[\\/]/;
 
 /** Resolve a path as written against the effective directory (kept as written when nothing is known). */
-function resolveAgainst(p: string, cwd: string | undefined, home: string | undefined): string {
-  const e = expandHome(p, home);
+function resolveAgainst(p: string, ctx: ShellContext): string {
+  const e = expandHome(p, ctx);
   if (path.isAbsolute(e) || WIN_ABS.test(e)) return path.normalize(e);
-  return cwd ? path.resolve(cwd, e) : e;
+  return ctx.cwd ? path.resolve(ctx.cwd, e) : e;
+}
+
+/** `git config` options that only read; anything else (set, --unset, --add, --edit, ...) writes a config file. */
+const GIT_CONFIG_READ = /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope|--get-urlmatch|--name-only|list|get)$/;
+const GIT_CONFIG_WRITE = /^(--unset|--unset-all|--add|--replace-all|--edit|-e|--rename-section|--remove-section|set|unset|edit|rename-section|remove-section)$/;
+
+/**
+ * The file a `git config ...` call would write, resolved against the effective cwd: `.git/config`
+ * of the repo (`-C <dir>` honoured), `~/.gitconfig` for `--global` / `--system` (which can point
+ * `core.hooksPath` anywhere for every repo), or the `--file` argument. Undefined when it only reads.
+ */
+function gitConfigWriteTarget(args: string[], ctx: ShellContext): string | undefined {
+  let j = 0;
+  let repo = ctx.cwd;
+  while (j < args.length && args[j].startsWith('-')) {
+    if (args[j] === '-C' && args[j + 1]) repo = resolveAgainst(args[j + 1], ctx);
+    if (args[j] === '-C' || args[j] === '-c') j++;
+    j++;
+  }
+  if (args[j] !== 'config') return undefined;
+  const rest = args.slice(j + 1);
+  const readOnly = rest.some((a) => GIT_CONFIG_READ.test(a)) && !rest.some((a) => GIT_CONFIG_WRITE.test(a));
+  if (readOnly) return undefined;
+  const fileIdx = rest.findIndex((a) => a === '--file' || a === '-f');
+  if (fileIdx >= 0 && rest[fileIdx + 1]) return resolveAgainst(rest[fileIdx + 1], ctx);
+  const file = rest.find((a) => a.startsWith('--file='));
+  if (file) return resolveAgainst(file.slice('--file='.length), ctx);
+  if (rest.includes('--global') || rest.includes('--system')) return ctx.home ? path.join(ctx.home, '.gitconfig') : '~/.gitconfig';
+  return repo ? path.join(repo, '.git', 'config') : path.join('.git', 'config');
 }
 
 const NULL_DEVICES = new Set(['/dev/null', 'nul', '/dev/stdout', '/dev/stderr', '/dev/tty']);
@@ -142,7 +227,7 @@ interface SegmentResult {
 
 function analyseSegment(rawTokens: string[], ctx: ShellContext): SegmentResult | undefined {
   if (rawTokens.length === 0) return undefined;
-  const resolve = (p: string): string => resolveAgainst(p, ctx.cwd, ctx.home);
+  const resolve = (p: string): string => resolveAgainst(p, ctx);
   const written: string[] = [];
   let writes = false;
   let matched: string | undefined;
@@ -198,7 +283,7 @@ function analyseSegment(rawTokens: string[], ctx: ShellContext): SegmentResult |
       writeAll(nonFlags);
       if (codeArgs.length) hit('tee', codeArgs);
       break;
-    case 'git':
+    case 'git': {
       if (args[0] === 'apply' || args[0] === 'am') hit(`git ${args[0]}`, codeArgs);
       else if (args[0] === 'checkout' && codeArgs.length) {
         hit('git checkout <file>', codeArgs);
@@ -207,6 +292,34 @@ function analyseSegment(rawTokens: string[], ctx: ShellContext): SegmentResult |
         hit('git restore <file>', codeArgs);
         writeAll(nonFlags.slice(1));
       }
+      // `git config` writes .git/config (or ~/.gitconfig), which decides what git runs (F2 parity with the hook).
+      const config = gitConfigWriteTarget(args, ctx);
+      if (config) written.push(config);
+      break;
+    }
+    case 'ln':
+    case 'copy':
+    case 'move':
+    case 'xcopy':
+    case 'robocopy': {
+      const dest = nonFlags[nonFlags.length - 1];
+      if (dest) written.push(resolve(dest));
+      break;
+    }
+    case 'chmod':
+      // Not a code write, but `chmod +x .git/hooks/pre-commit` arms a hook: every file counts as written.
+      writeAll(nonFlags.filter((a) => !/^([ugoa]*[+=-][rwxXst]*|[0-7]{3,4})$/.test(a)));
+      break;
+    case 'chown':
+    case 'chattr':
+      // The first plain argument is the owner / attribute list, the rest are files.
+      writeAll(nonFlags.slice(1));
+      break;
+    case 'touch':
+    case 'shred':
+    case 'attrib':
+    case 'icacls':
+      writeAll(nonFlags);
       break;
     case 'patch':
       hit('patch', codeArgs);
@@ -254,6 +367,7 @@ function analyseSegment(rawTokens: string[], ctx: ShellContext): SegmentResult |
     case 'bash':
     case 'zsh':
     case 'dash':
+    case 'ksh':
     case 'cmd':
     case 'powershell':
     case 'pwsh': {
@@ -277,7 +391,7 @@ const CD_COMMANDS = new Set(['cd', 'chdir', 'pushd', 'set-location']);
 
 /** Analyse a full command line. Pass the agent's cwd and the person's home to get absolute targets. */
 export function analyseCommand(command: string, ctx: ShellContext = {}): ShellAnalysis {
-  const segments = command.split(SEGMENT_SPLIT).filter((s) => s.trim());
+  const segments = splitSegments(command);
   const targets = new Set<string>();
   const writeTargets = new Set<string>();
   const enteredDirs = new Set<string>();
@@ -295,7 +409,7 @@ export function analyseCommand(command: string, ctx: ShellContext = {}): ShellAn
       const args = bare.slice(1).filter((a) => !/^-[A-Za-z]+$/.test(a) && !/^\/d$/i.test(a));
       const arg = args.find((a) => a !== '-');
       if (cmd === 'pushd') stack.push(cwd);
-      if (arg !== undefined) cwd = resolveAgainst(arg, cwd, ctx.home);
+      if (arg !== undefined) cwd = resolveAgainst(arg, { ...ctx, cwd });
       else if (args.includes('-')) cwd = undefined;
       else cwd = ctx.home;
       if (cwd !== undefined) enteredDirs.add(cwd);
@@ -305,7 +419,7 @@ export function analyseCommand(command: string, ctx: ShellContext = {}): ShellAn
       cwd = stack.length ? stack.pop() : cwd;
       continue;
     }
-    const r = analyseSegment(tokens, { cwd, home: ctx.home });
+    const r = analyseSegment(tokens, { ...ctx, cwd });
     if (!r) continue;
     if (r.writes) {
       matched = matched ?? r.matched;

@@ -9,14 +9,19 @@ import {
   codexHomeOf,
   codexHookLines,
   codexHooksChanged,
+  isGitHooksOrConfig,
   isGitInfoExclude,
   isInsideGitDir,
+  isProtectedDirectory,
   protectedPathMentioned,
+  protectedShellReason,
+  shellProtectedTarget,
   tomlLooksValid,
   type PolicyContext,
 } from '../../../src/gate/pure/policy';
 import { resolveTarget } from '../../../src/gate/pure/ingress';
 import { applyEdit, applyEdits } from '../../../src/gate/pure/proposals';
+import { analyseCommand } from '../../../src/gate/pure/shell';
 
 suite('gate/pure/policy', () => {
   let root: string;
@@ -67,12 +72,31 @@ suite('gate/pure/policy', () => {
     assert.match((r as { reason: string }).reason, /twin/);
   });
 
+  test('.git/hooks/** and .git/config are denied outright: git runs them as the person, outside any review (F2)', () => {
+    for (const rel of [['.git', 'hooks', 'pre-commit'], ['.git', 'hooks', 'pre-commit.sample'], ['.git', 'hooks', 'nested', 'x'], ['.git', 'hooks'], ['.git', 'config'], ['sub', 'repo', '.git', 'config']]) {
+      const p = path.join(ws, ...rel);
+      assert.equal(isGitHooksOrConfig(p), true, rel.join('/'));
+      const r = checkWritePolicy(modify(p, null, '#!/bin/sh'), ctx);
+      assert.equal(r.action, 'deny', rel.join('/'));
+      assert.match((r as { reason: string }).reason, /git hook or the git config/);
+    }
+    // A move onto them or a delete of them is refused too.
+    assert.equal(checkWritePolicy({ kind: 'move', path: path.join(ws, 'x.sh'), newPath: path.join(ws, '.git', 'hooks', 'pre-push'), before: 'x', after: 'x' }, ctx).action, 'deny');
+    assert.equal(checkWritePolicy({ kind: 'delete', path: path.join(ws, '.git', 'config'), before: 'x', after: null }, ctx).action, 'deny');
+    // Names that only look similar are not git hooks or the git config.
+    for (const rel of [['.git', 'config.lock'], ['.git', 'info', 'config'], ['src', 'hooks', 'x.py'], ['config'], ['hooks', 'pre-commit']]) {
+      assert.equal(isGitHooksOrConfig(path.join(ws, ...rel)), false, rel.join('/'));
+    }
+  });
+
   test('other .git/** writes -> ask with a warning', () => {
-    assert.equal(isInsideGitDir(path.join(ws, '.git', 'config')), true);
+    assert.equal(isInsideGitDir(path.join(ws, '.git', 'HEAD')), true);
     assert.equal(isInsideGitDir(path.join(ws, 'src', 'git.py')), false);
-    const r = checkWritePolicy(modify(path.join(ws, '.git', 'hooks', 'pre-commit'), null, '#!/bin/sh'), ctx);
-    assert.equal(r.action, 'ask');
-    assert.match((r as { warning: string }).warning, /\.git folder/);
+    for (const rel of [['.git', 'HEAD'], ['.git', 'refs', 'heads', 'main'], ['.git', 'info', 'attributes'], ['.git', 'config.lock']]) {
+      const r = checkWritePolicy(modify(path.join(ws, ...rel), null, 'x'), ctx);
+      assert.equal(r.action, 'ask', rel.join('/'));
+      assert.match((r as { warning: string }).warning, /\.git folder/);
+    }
   });
 
   suite('claude settings hooks diff', () => {
@@ -295,10 +319,97 @@ suite('gate/pure/policy', () => {
       assert.ok(protectedPathMentioned('chmod -x ~/.explainit/hooks/explainit-hook.sh', ctx));
       assert.ok(protectedPathMentioned(`sed -i "" ${path.join(ws, '.git', 'info', 'exclude')}`, ctx));
     });
+    test('git hooks, the git config and core.hooksPath are caught (F2)', () => {
+      assert.ok(protectedPathMentioned('cp evil.sh .git/hooks/pre-commit', ctx));
+      assert.ok(protectedPathMentioned('echo "[core]" >> .git/config', ctx));
+      assert.ok(protectedPathMentioned('git config core.hooksPath /tmp/hooks', ctx));
+      assert.ok(protectedPathMentioned('git config --global core.hookspath ~/h', ctx));
+    });
     test('benign commands are not flagged', () => {
       assert.equal(protectedPathMentioned('npm test', ctx), undefined);
       assert.equal(protectedPathMentioned('git status', ctx), undefined);
+      assert.equal(protectedPathMentioned('git config --get user.name', ctx), undefined);
       assert.equal(protectedPathMentioned(`cat ${path.join(ws, 'src', 'app.py')}`, ctx), undefined);
+    });
+  });
+
+  suite('shellProtectedTarget: writes resolved against the effective cwd (F4)', () => {
+    const analyse = (cmd: string, cwd?: string) => analyseCommand(cmd, { cwd: cwd ?? ws, home: userHome, explainitHome: home, codexHome: codexHomeOf(ctx) });
+    const hitOf = (cmd: string, cwd?: string) => shellProtectedTarget(analyse(cmd, cwd), ctx);
+
+    test('cd / pushd into a protected directory is refused even though no token names a protected file', () => {
+      const cd = hitOf('cd ~/.claude && cat > settings.json');
+      assert.equal(cd?.kind, 'directory');
+      assert.equal(cd?.path, path.join(userHome, '.claude'));
+      assert.match(protectedShellReason(cd!), /changes into/);
+      const sub = hitOf('(cd ~/.explainit/sessions && echo x > 1.json)');
+      assert.equal(sub?.kind, 'directory');
+      assert.equal(sub?.path, path.join(userHome, '.explainit', 'sessions'));
+      const pushd = hitOf('pushd ~/.codex; tee hooks.json');
+      assert.equal(pushd?.kind, 'directory');
+      assert.equal(pushd?.path, path.join(userHome, '.codex'));
+      assert.equal(hitOf(`cd ${home}/hooks && ls`)?.kind, 'directory');
+      assert.equal(hitOf('cd .git/hooks && ls')?.kind, 'directory');
+      assert.equal(hitOf('bash -c "cd ~/.claude && cat > settings.json"')?.kind, 'directory');
+    });
+
+    test('isProtectedDirectory: the ExplainIT home, the user-layer .claude / .codex folders, CODEX_HOME, and any .claude / .codex / .explainit / .git folder', () => {
+      assert.equal(isProtectedDirectory(home, ctx), true);
+      assert.equal(isProtectedDirectory(path.join(home, 'sessions'), ctx), true);
+      assert.equal(isProtectedDirectory(path.join(userHome, '.claude'), ctx), true);
+      assert.equal(isProtectedDirectory(path.join(userHome, '.codex', 'sub'), ctx), true);
+      assert.equal(isProtectedDirectory(path.join(ws, '.git'), ctx), true);
+      assert.equal(isProtectedDirectory(path.join(ws, 'packages', 'api', '.claude'), ctx), true);
+      const codexHome = path.join(root, 'codex-home');
+      assert.equal(isProtectedDirectory(codexHome, { ...ctx, codexHome }), true);
+      assert.equal(isProtectedDirectory(codexHome, ctx), false);
+      assert.equal(isProtectedDirectory(ws, ctx), false);
+      assert.equal(isProtectedDirectory(path.join(ws, 'src'), ctx), false);
+      assert.equal(isProtectedDirectory(userHome, ctx), false);
+    });
+
+    test('redirect, tee, heredoc and in-place targets are resolved against the cwd of their segment', () => {
+      const claude = path.join(userHome, '.claude');
+      // No cd in the command, but the agent already runs inside the protected folder.
+      const redirect = hitOf('cat > settings.json', claude);
+      assert.equal(redirect?.kind, 'file');
+      assert.equal(redirect?.path, path.join(claude, 'settings.json'));
+      assert.match(protectedShellReason(redirect!), /Claude Code settings/);
+      assert.equal(hitOf('cat <<EOF > settings.local.json\n{}\nEOF', claude)?.kind, 'file');
+      assert.equal(hitOf('printf x | tee -a config.toml', path.join(userHome, '.codex'))?.kind, 'file');
+      assert.equal(hitOf('sed -i "s/a/b/" exclude', path.join(ws, '.git', 'info'))?.kind, 'file');
+      assert.equal(hitOf('cd src && cd ../.git/info && echo "" > exclude')?.kind, 'directory', 'the cd into .git is refused first');
+      assert.equal(hitOf('cp evil ../hooks/pre-commit', path.join(ws, '.git', 'info'))?.kind, 'file');
+      assert.equal(hitOf('chmod +x .git/hooks/pre-commit')?.what, 'a git hook or the git config, which git runs outside any review');
+      assert.equal(hitOf('echo x > $CODEX_HOME/hooks.json')?.path, path.join(userHome, '.codex', 'hooks.json'), 'CODEX_HOME unset: the default codex home is the user one');
+      const codexHome = path.join(root, 'codex-home');
+      const withHome = { ...ctx, codexHome };
+      const spelled = shellProtectedTarget(analyseCommand('echo x > $CODEX_HOME/hooks.json', { cwd: ws, home: userHome, codexHome }), withHome);
+      assert.equal(spelled?.path, path.join(codexHome, 'hooks.json'));
+      assert.equal(shellProtectedTarget(analyseCommand('echo x > $EXPLAINIT_HOME/state.json', { cwd: ws, home: userHome, explainitHome: home }), ctx)?.kind, 'file');
+    });
+
+    test('git config writes .git/config (or the global git config); reads do not', () => {
+      const local = hitOf('git config user.name "A"');
+      assert.equal(local?.kind, 'file');
+      assert.equal(local?.path, path.join(ws, '.git', 'config'));
+      assert.equal(hitOf('git -C src config user.name "A"')?.path, path.join(ws, 'src', '.git', 'config'));
+      const global = hitOf('git config --global user.email a@b.c');
+      assert.equal(global?.path, path.join(userHome, '.gitconfig'));
+      assert.match(global?.what ?? '', /global git config/);
+      assert.equal(hitOf('git config --unset user.name')?.kind, 'file');
+      assert.equal(hitOf('git config --file other.ini user.name x')?.kind, undefined, 'an ordinary file is not protected');
+      assert.equal(hitOf('git config --get user.name'), undefined);
+      assert.equal(hitOf('git config --list'), undefined);
+      assert.equal(hitOf('git config -l'), undefined);
+    });
+
+    test('ordinary commands are not hit', () => {
+      assert.equal(hitOf('cd src && echo x > a.py'), undefined);
+      assert.equal(hitOf('npm test > log.txt'), undefined);
+      assert.equal(hitOf('cd /tmp && ls'), undefined);
+      assert.equal(hitOf('cd && ls'), undefined, 'a bare cd goes to the home folder, which is not protected');
+      assert.equal(hitOf('pushd src; popd; echo x > notes.txt'), undefined);
     });
   });
 });

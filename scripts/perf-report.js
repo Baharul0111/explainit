@@ -57,7 +57,6 @@ const NO_TIMING_MESSAGE =
 function parsePerf(text) {
   const out = [];
   for (const raw of String(text).split(/\r?\n/)) {
-    // eslint-disable-next-line no-control-regex
     const line = raw.replace(/\x1b\[[0-9;]*m/g, '');
     for (const [re, source] of PATTERNS) {
       const m = re.exec(line);

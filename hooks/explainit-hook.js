@@ -405,10 +405,14 @@ function protectedReason(opts, tool, input, target, cwd) {
   const isClaudeSettings = (parent === '.claude' || claudeSettings.some(function (f) { return sameFile(f, target); })) && (base === 'settings.json' || base === 'settings.local.json');
   const isCodexHooks = base === 'hooks.json' && (parent === '.codex' || sameFile(codexFiles[0], target));
   const isCodexConfig = base === 'config.toml' && (parent === '.codex' || sameFile(codexFiles[1], target));
-  if (isClaudeSettings && ((userLayer && tool === 'Write') || jsonHooksChange(tool, input, target))) return refuse(base + ' holds the hooks that run the ExplainIT checkpoint.');
+  // For the pinned user-layer files an edit whose outcome cannot be replayed (unknown tool shape, an
+  // old_string that is not in the file, a patch that deletes the file) fails closed: the person can make
+  // that change by hand, and guessing wrong here would hand an assistant the checkpoint switch.
+  const opaque = userLayer && tool !== 'Write' && proposedText(tool, input, target) === null;
+  if (isClaudeSettings && ((userLayer && tool === 'Write') || opaque || jsonHooksChange(tool, input, target))) return refuse(base + ' holds the hooks that run the ExplainIT checkpoint.');
   // hooks.json is nothing but hooks, so any partial edit of it is a hooks change.
   if (isCodexHooks && (userLayer || tool !== 'Write' || jsonHooksChange(tool, input, target))) return refuse('.codex/hooks.json holds the hooks that run the ExplainIT checkpoint.');
-  if (isCodexConfig && ((userLayer && tool === 'Write') || tomlHooksChange(tool, input, target))) return refuse('.codex/config.toml records which hooks Codex trusts, including the ExplainIT checkpoint.');
+  if (isCodexConfig && ((userLayer && tool === 'Write') || opaque || tomlHooksChange(tool, input, target))) return refuse('.codex/config.toml records which hooks Codex trusts, including the ExplainIT checkpoint.');
   return null;
 }
 

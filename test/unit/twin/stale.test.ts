@@ -140,6 +140,8 @@ suite('twin/pure/stale (sidecar merge)', () => {
     assert.strictEqual(outlineUnavailable(none, previousSections(sidecar, parsed)), true);
     assert.strictEqual(outlineUnavailable({ ...none, source: 'tree-sitter' }, sidecar.sections), false, 'a positive "no functions" answer is not ignorance');
     assert.strictEqual(outlineUnavailable(none, []), false, 'nothing to keep');
+    assert.strictEqual(outlineUnavailable(none, sidecar.sections, '  \n\t\n'), false, 'a blank file really has no functions');
+    assert.strictEqual(outlineUnavailable(none, sidecar.sections, 'subroutine foo\nend subroutine\n'), true);
     assert.strictEqual(outlineUnavailable(mapOf(a), sidecar.sections), false);
     assert.deepStrictEqual(previousSections(undefined, parsed).map((s) => s.name), ['a', 'b']);
 

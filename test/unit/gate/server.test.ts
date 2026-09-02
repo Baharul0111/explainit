@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import type { HookDecision } from '../../../src/core/types';
 import type { HookEnvelope } from '../../../src/core/interfaces';
 import { IngressValidationError } from '../../../src/gate/controller';
-import { BODY_LIMIT, FAST_PATH_MS, GateHttpServer } from '../../../src/gate/server';
+import { BODY_LIMIT, FAST_PATH_MS, GateHttpServer, MAX_IN_FLIGHT } from '../../../src/gate/server';
 import { quietLogger } from './fakes';
 
 interface Resp {
@@ -220,6 +220,30 @@ suite('gate/server', () => {
     const again = await request(port, 'GET', `/v1/decision/${id}`, undefined, token);
     assert.equal(again.body.status, 'done');
     assert.equal(server.inFlight, 0);
+  });
+
+  test('beyond the in-flight cap the server answers ask at once instead of queueing more work (F7)', async function () {
+    this.timeout(10_000);
+    await server.stop();
+    server = new GateHttpServer({ logger: quietLogger(), version: '9.9.9', folders: () => ['/ws'], paused: () => paused, handle, disposables, sessionsDir: () => dir, fastPathMs: 100, longPollMs: 200, maxInFlight: 1 });
+    const info = await server.start();
+    port = info.port;
+    token = info.token;
+    assert.equal(MAX_IN_FLIGHT, 64);
+    const first = await request(port, 'POST', '/v1/hook', envelope('Slow'), token);
+    assert.equal(first.status, 202);
+    assert.equal(server.inFlight, 1);
+    const second = await request(port, 'POST', '/v1/hook', envelope('Write'), token);
+    assert.equal(second.status, 200);
+    assert.equal(second.body.decision.permissionDecision, 'ask');
+    assert.match(second.body.decision.reason, /1 changes waiting for a decision/);
+    assert.equal(server.inFlight, 1, 'the capped call never reached the controller');
+    resolveSlow!({ permissionDecision: 'allow' });
+    const done = await request(port, 'GET', `/v1/decision/${first.body.requestId}`, undefined, token);
+    assert.equal(done.body.status, 'done');
+    assert.equal(server.inFlight, 0);
+    const third = await request(port, 'POST', '/v1/hook', envelope('Write'), token);
+    assert.equal(third.body.decision.permissionDecision, 'deny', 'the slot was released');
   });
 
   test('stop removes the session file and releases the port', async () => {

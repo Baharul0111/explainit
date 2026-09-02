@@ -134,11 +134,13 @@ export function previousSections(sidecar: TwinSidecar | undefined, parsed: Parse
 
 /**
  * True when nothing could outline the file this time (`source: 'none'`, no functions) although a twin with
- * sections exists. That is ignorance, not "this file has no functions": a staleness pass has no AI
+ * sections exists and the file still holds text. That is ignorance, not "this file has no functions": a staleness pass has no AI
  * segmentation, an assistant can be disconnected, an AI outline can time out. A positive "no functions"
  * answer (a symbol provider or tree-sitter parsed the file and found none) has another source.
  */
-export function outlineUnavailable(map: FunctionMap, previous: readonly TwinSection[]): boolean {
+export function outlineUnavailable(map: FunctionMap, previous: readonly TwinSection[], sourceText?: string): boolean {
+  // A blank file also answers `none`, but that is a real "no functions", not ignorance.
+  if (sourceText !== undefined && sourceText.trim().length === 0) return false;
   return map.source === 'none' && map.functions.length === 0 && previous.length > 0;
 }
 

@@ -407,7 +407,7 @@ export class TwinEngineImpl implements TwinEngine {
     // segmentation; a file only an assistant can outline is counted with 0 functions here and
     // outlined for real when its turn comes in the run.
     const map = await this.functionMap(doc);
-    const { plan } = this.planFor(map, sidecar, parsed, { kind: 'changed' }, textHashOf(text));
+    const { plan } = this.planFor(map, sidecar, parsed, { kind: 'changed' }, text);
     return { sourcePath: abs, twinPath, map, plan, request: this.requestFor(doc, map, plan.toGenerate), fresh: false };
   }
 
@@ -452,8 +452,9 @@ export class TwinEngineImpl implements TwinEngine {
    * (a staleness pass without AI segmentation, a disconnected assistant, an AI outline that timed out),
    * the old sections are kept and marked out of date instead of being replaced by "no functions".
    */
-  private planFor(map: FunctionMap, sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined, mode: GenerateMode, textHash: string): { plan: TwinPlan; outlined: boolean } {
-    if (outlineUnavailable(map, previousSections(sidecar, parsed))) {
+  private planFor(map: FunctionMap, sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined, mode: GenerateMode, text: string): { plan: TwinPlan; outlined: boolean } {
+    const textHash = textHashOf(text);
+    if (outlineUnavailable(map, previousSections(sidecar, parsed), text)) {
       return { plan: planWithoutOutline(map, sidecar, parsed, !sidecar || sidecar.textHash !== textHash), outlined: false };
     }
     return { plan: planSections(map, sidecar, parsed, mode), outlined: true };
@@ -532,7 +533,7 @@ export class TwinEngineImpl implements TwinEngine {
     const map = await this.functionMap(doc, opts.token, mayGenerate);
     const mode = typeof opts.mode === 'function' ? opts.mode(map) : opts.mode;
     const bypassCache = opts.bypassCache || (opts.bypassCacheWhen ? opts.bypassCacheWhen(map) : false);
-    const { plan, outlined } = this.planFor(map, sidecar, parsed, mode, textHash);
+    const { plan, outlined } = this.planFor(map, sidecar, parsed, mode, text);
     if (!outlined) {
       const msg = `ExplainIT could not find the functions in ${base} this time, so the existing twin is kept and marked out of date.`;
       this.log.warn(`${msg} (mode ${mode.kind}, ${plan.entries.length} sections kept)`);

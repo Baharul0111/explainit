@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { createDecisionMemory, hunkHashOf } from '../../../src/review/pure/memory';
+import { createDecisionMemory, hasSessionId, hunkHashOf, INACTIVITY_TTL_MS } from '../../../src/review/pure/memory';
 import type { Decision, FunctionHunk, GateRequest } from '../../../src/core/types';
 
 function hunk(id: string, before: string, after: string, extra: Partial<FunctionHunk> = {}): FunctionHunk {
@@ -131,6 +131,68 @@ suite('review/pure/memory', () => {
     m.remember(decision('accept', 'session'), request({ sessionId: 's10' }));
     m.clearSession('claude', 's1');
     assert.equal(m.lookup('claude', 's10', '/w/x', 'y'), 'accept');
+  });
+
+  test('a request without a session id gets no memory at all: nothing remembered, nothing found (F3)', () => {
+    const m = createDecisionMemory();
+    for (const sessionId of ['', '   ', '\t']) {
+      m.remember(decision('accept', 'session'), request({ sessionId }));
+      m.remember(decision('accept', 'file'), request({ sessionId }));
+      m.remember(decision('accept', 'one'), request({ sessionId }));
+    }
+    assert.deepEqual(m.size(), { sessions: 0, files: 0, hunks: 0 });
+    // A real session's acceptance is never visible to a request without an id, and never to another id.
+    m.remember(decision('accept', 'session'), request({ sessionId: 's1' }));
+    for (const sessionId of ['', '  ', undefined as unknown as string, 'unknown-session']) {
+      assert.equal(m.lookup('claude', sessionId, '/w/app.py', 'h1'), undefined, JSON.stringify(sessionId));
+    }
+    assert.equal(m.lookup('claude', 's1', '/w/app.py', 'h1'), 'accept');
+    assert.equal(hasSessionId('s1'), true);
+    assert.equal(hasSessionId(''), false);
+    assert.equal(hasSessionId(' '), false);
+    assert.equal(hasSessionId(undefined), false);
+    assert.equal(hasSessionId(42), false);
+  });
+
+  test('session and file acceptances expire after 30 minutes without use; a hit refreshes them (F3)', () => {
+    let now = 1_000_000_000;
+    const m = createDecisionMemory({ now: () => now });
+    assert.equal(INACTIVITY_TTL_MS, 30 * 60_000);
+    m.remember(decision('accept', 'session'), request({ sessionId: 's1' }));
+    m.remember(decision('accept', 'file'), request({ sessionId: 's2' }));
+    now += INACTIVITY_TTL_MS - 1000;
+    assert.equal(m.lookup('claude', 's1', '/w/any.py', 'x'), 'accept');
+    assert.equal(m.lookup('claude', 's2', '/w/app.py', 'x'), 'accept');
+    // Used just before the deadline: the clock restarts from that use.
+    now += INACTIVITY_TTL_MS - 1000;
+    assert.equal(m.lookup('claude', 's1', '/w/any.py', 'x'), 'accept');
+    assert.equal(m.lookup('claude', 's2', '/w/app.py', 'x'), 'accept');
+    // Left alone for longer than the window: gone, and a review is needed again.
+    now += INACTIVITY_TTL_MS + 1;
+    assert.equal(m.lookup('claude', 's1', '/w/any.py', 'x'), undefined);
+    assert.equal(m.lookup('claude', 's2', '/w/app.py', 'x'), undefined);
+    const size = m.size();
+    assert.equal(size.sessions, 0);
+    assert.equal(size.files, 0);
+    assert.equal(size.hunks, 4, 'the exact hunks the file-wide accept covered stay known (2 hunks, by hash and by id)');
+    // Remembering again after expiry works as a fresh acceptance.
+    m.remember(decision('accept', 'session'), request({ sessionId: 's1' }));
+    assert.equal(m.lookup('claude', 's1', '/w/any.py', 'x'), 'accept');
+  });
+
+  test('the inactivity window is configurable for tests; hunk-hash memory does not time out', () => {
+    let now = 0;
+    const m = createDecisionMemory({ now: () => now, ttlMs: 100 });
+    const req = request({ sessionId: 's1' });
+    m.remember(decision('accept', 'one'), req);
+    m.remember(decision('accept', 'session'), req);
+    m.remember(decision('accept', 'file'), request({ sessionId: 's3' }));
+    now = 101;
+    assert.equal(m.lookup('claude', 's1', '/w/other.py', 'zz'), undefined, 'session acceptance expired');
+    assert.equal(m.lookup('claude', 's3', '/w/app.py', 'zz'), undefined, 'file acceptance expired');
+    const h = hunkHashOf(req.hunksByPath['/w/app.py'][0]);
+    assert.equal(m.lookup('claude', 's1', '/w/app.py', h), 'accept', 'the exact accepted hunk is still known');
+    assert.equal(m.lookup('claude', 's3', '/w/app.py', 'h1'), 'accept', 'and so are the hunks a file-wide accept covered');
   });
 
   test('hunk memory is capped so a long session cannot grow without bound', () => {

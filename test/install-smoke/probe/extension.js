@@ -295,7 +295,7 @@ async function checkpointSteps(api, appPy) {
   const before = readIfExists(appPy);
   if (before === undefined || !before.includes(GREET_BEFORE)) step(STEP_HOOK_REJECT, false, `${appPy} does not contain the greet() line to change: ${GREET_BEFORE}`);
   const after = before.replace(GREET_BEFORE, GREET_AFTER);
-  const kit = api.kits().find((k) => true);
+  const kit = api.kits()[0];
   const cpBefore = kit ? (await kit.checkpoints.list()).filter((c) => samePath(c.path, appPy)).length : 0;
   try {
     const { run, cardInfo, shownMs } = await roundTrip(found.command, claudeWritePayload({ cwd: workspaceDir, filePath: appPy, content: after, sessionId: 'install-smoke-reject', toolUseId: 'toolu_smoke_reject' }), 'reject');

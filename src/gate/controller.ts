@@ -16,7 +16,7 @@ import { recordLanding } from '../core/landing';
 import { validateEnvelope, resolveTarget, commandText, commandForAnalysis, targetPathOf, type IngressOk } from './pure/ingress';
 import { buildClaudeWrites, buildPatchWrites, proposalSize, type ProposalIo } from './pure/proposals';
 import { extractPatchText, parsePatch } from './pure/applyPatch';
-import { checkWritePolicy, protectedPathMentioned, protectedMentionReason, protectedShellReason, shellProtectedTarget, type PolicyContext } from './pure/policy';
+import { checkWritePolicy, codexHomeOf, protectedPathMentioned, protectedMentionReason, protectedShellReason, shellProtectedTarget, type PolicyContext } from './pure/policy';
 import { analyseCommand, shellWriteReason } from './pure/shell';
 import { computeHunks, reconstruct } from './pure/differ';
 import { detectEol, languageIdForPath, withEol } from './pure/text';
@@ -290,7 +290,7 @@ export class GateController {
     // against the directory each segment runs in (security review F4).
     const mentioned = protectedPathMentioned(cmd, ctx);
     if (mentioned) return deny(protectedMentionReason(mentioned));
-    const analysis = analyseCommand(commandForAnalysis(v.toolInput), { cwd: v.cwd, home: ctx.userHome });
+    const analysis = analyseCommand(commandForAnalysis(v.toolInput), { cwd: v.cwd, home: ctx.userHome, explainitHome: ctx.explainitHome, codexHome: codexHomeOf(ctx) });
     const hit = shellProtectedTarget(analysis, ctx);
     if (hit) return deny(protectedShellReason(hit));
     const mode = this.deps.settings.get('gateShellWrites');
@@ -456,6 +456,8 @@ export class GateController {
     }
 
     // Per-session cap on reviews waiting for a human (F7): beyond it the agent's own prompt decides.
+    // The slot is taken synchronously, before any await, so a burst of concurrent hook calls cannot
+    // all read the same count and slip past the cap together.
     const bucket = this.sessionBucket(v);
     const waiting = this.pendingBySession.get(bucket) ?? 0;
     if (waiting >= MAX_PENDING_PER_SESSION) {
@@ -464,32 +466,31 @@ export class GateController {
         `ExplainIT already has ${waiting} changes from this assistant session waiting for the person to review. Decide on those first; this change goes to your normal permission prompt.`,
       );
     }
-
-    for (const w of writes) {
-      await this.journal(w.path, {
-        kind: 'proposed',
-        requestId,
-        agent: v.agent,
-        path: w.path,
-        beforeHash: hashText(w.before),
-        afterHash: hashText(w.after),
-        note: `${v.toolName}: ${w.kind}${w.newPath ? ` -> ${w.newPath}` : ''}, ${hunksByPath[w.path].length} hunk(s)`,
-      });
-    }
-
-    for (const l of this.requestListeners) {
-      try {
-        l(request);
-      } catch (e) {
-        this.log.warn('onRequest listener failed', e);
-      }
-    }
-
-    const cancel = new CancelSource();
-    this.pendingHuman++;
     this.pendingBySession.set(bucket, waiting + 1);
+    this.pendingHuman++;
     let decision: Decision;
     try {
+      for (const w of writes) {
+        await this.journal(w.path, {
+          kind: 'proposed',
+          requestId,
+          agent: v.agent,
+          path: w.path,
+          beforeHash: hashText(w.before),
+          afterHash: hashText(w.after),
+          note: `${v.toolName}: ${w.kind}${w.newPath ? ` -> ${w.newPath}` : ''}, ${hunksByPath[w.path].length} hunk(s)`,
+        });
+      }
+
+      for (const l of this.requestListeners) {
+        try {
+          l(request);
+        } catch (e) {
+          this.log.warn('onRequest listener failed', e);
+        }
+      }
+
+      const cancel = new CancelSource();
       decision = await this.deps.review.review(request, (hunk, onText, token) => this.explain(request, hunk, onText, token), { token: cancel.token });
     } finally {
       this.pendingHuman--;

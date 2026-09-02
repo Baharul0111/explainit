@@ -352,6 +352,8 @@ export function protectedPathMentioned(command: string, ctx: PolicyContext): str
     '.git\\hooks',
     '.git/config',
     '.git\\config',
+    // `git config core.hooksPath <dir>` points every hook at a folder the assistant controls.
+    'core.hookspath',
   );
   for (const f of CODEX_FILES) candidates.push(...variants(path.join(codexHomeOf(ctx), f)));
   for (const r of [ctx.userHome, ...ctx.folders]) {
@@ -379,6 +381,7 @@ export function protectedShellFile(p: string, ctx: PolicyContext): string | unde
   for (const e of ctx.extraProtected ?? []) if (e && sameFile(e, p)) return 'the ExplainIT hook script';
   if (isGitInfoExclude(p)) return '.git/info/exclude, which keeps the twin files out of git';
   if (isGitHooksOrConfig(p)) return 'a git hook or the git config, which git runs outside any review';
+  if (sameFile(path.join(ctx.userHome, '.gitconfig'), p)) return 'the global git config, which decides where git looks for hooks in every repository';
   if (isClaudeSettingsPath(p, ctx)) return 'the Claude Code settings that hold the ExplainIT hooks';
   if (isCodexConfigPath(p, ctx)) return 'the Codex configuration that holds the ExplainIT hooks';
   return undefined;

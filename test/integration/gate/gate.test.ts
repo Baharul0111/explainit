@@ -253,7 +253,41 @@ suite('gate (integration)', function () {
     assert.match(d.reason!, /ExplainIT/);
     const exclude = await api.gate.handle(claudeWrite(path.join(workspace, '.git', 'info', 'exclude'), ''));
     assert.equal(exclude.permissionDecision, 'deny');
+    // Git hooks and the git config run as the person outside any review: denied outright, not `ask`.
+    const gitHook = await api.gate.handle(claudeWrite(path.join(workspace, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n'));
+    assert.equal(gitHook.permissionDecision, 'deny');
+    assert.match(gitHook.reason!, /git hook or the git config/);
+    const gitConfig = await api.gate.handle(claudeWrite(path.join(workspace, '.git', 'config'), '[core]\n'));
+    assert.equal(gitConfig.permissionDecision, 'deny');
     assert.equal(hook().current(), undefined, 'no review was opened');
+  });
+
+  test('a shell command that changes into a protected folder is denied whatever the shellWrites setting', async () => {
+    const env: HookEnvelope = {
+      agent: 'claude',
+      event: 'PreToolUse',
+      payload: { session_id: 'integration-session', cwd: workspace, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cd ~/.claude && cat > settings.json' } },
+    };
+    const d = await api.gate.handle(env);
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /ExplainIT/);
+    assert.equal(hook().current(), undefined, 'no review was opened');
+  });
+
+  test('a PostToolUse for a write ExplainIT never allowed is noted in the journal and otherwise ignored', async () => {
+    // A file of its own, so no landing expected by an earlier accepted write can be mistaken for this one.
+    const forged = canonicalPath(path.join(workspace, 'tmp_gate_forged.py'));
+    fs.writeFileSync(forged, PY);
+    try {
+      const kit = api.kits()[0];
+      const post = await api.gate.handle(claudeWrite(forged, PY, 'PostToolUse'));
+      assert.deepEqual(post, { permissionDecision: 'none' });
+      const entries = await kit.journal.list({ path: forged });
+      assert.equal(entries.filter((e) => e.kind === 'applied').length, 0, 'no applied entry for a write nobody allowed');
+      assert.ok(entries.some((e) => e.kind === 'system' && /had not allowed/.test(e.note ?? '')), 'a note records the ignored PostToolUse');
+    } finally {
+      fs.rmSync(forged, { force: true });
+    }
   });
 
   test('valid twin write -> allow without a review (twin-file fast path); garbage twin -> deny', async () => {
