@@ -62,9 +62,9 @@ class BaseLogger implements Logger {
   setLevel(level: LogLevel): void { this.levelRef.level = level; }
 }
 
-/** Rolling file sink: rotates at ~2MB, keeps 3 files. */
+/** Rolling file sink: synchronous appends (small lines), rotates at ~2MB, keeps 3 files. */
 export class FileSink implements LogSink {
-  private stream: fs.WriteStream | undefined;
+  private fd: number | undefined;
   private size = 0;
   constructor(private readonly file: string, private readonly maxBytes = 2 * 1024 * 1024) {
     ensureDir(path.dirname(file));
@@ -76,14 +76,14 @@ export class FileSink implements LogSink {
   }
   write(line: string): void {
     if (this.size > this.maxBytes) this.rotate();
-    if (!this.stream) this.stream = fs.createWriteStream(this.file, { flags: 'a' });
-    this.stream.write(line + '\n');
-    this.size += line.length + 1;
+    if (this.fd === undefined) this.fd = fs.openSync(this.file, 'a');
+    const buf = Buffer.from(line + '\n', 'utf8');
+    fs.writeSync(this.fd, buf);
+    this.size += buf.length;
   }
   private rotate(): void {
     try {
-      this.stream?.end();
-      this.stream = undefined;
+      this.close();
       for (let i = 2; i >= 0; i--) {
         const from = i === 0 ? this.file : `${this.file}.${i}`;
         const to = `${this.file}.${i + 1}`;
@@ -94,9 +94,18 @@ export class FileSink implements LogSink {
       /* ignore */
     }
   }
+  private close(): void {
+    if (this.fd !== undefined) {
+      try {
+        fs.closeSync(this.fd);
+      } catch {
+        /* ignore */
+      }
+      this.fd = undefined;
+    }
+  }
   dispose(): void {
-    this.stream?.end();
-    this.stream = undefined;
+    this.close();
   }
 }
 

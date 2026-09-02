@@ -40,12 +40,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
   // Safety kits: one per workspace folder (journal + restore points live outside the repo).
   const kits = new Map<string, SafetyKit>();
   const kitFor = (folder: string): SafetyKit => {
-    let k = kits.get(folder);
-    if (!k) {
-      k = createSafetyKit({ ...core, folder });
-      kits.set(folder, k);
-    }
-    return k;
+    const existing = kits.get(folder);
+    if (existing) return existing;
+    const created: SafetyKit = createSafetyKit({ ...core, folder });
+    kits.set(folder, created);
+    return created;
   };
   const safetyFor = (p: string): SafetyKit | undefined => {
     const folder = workspaceFolders().find((f) => isInside(f, p));
