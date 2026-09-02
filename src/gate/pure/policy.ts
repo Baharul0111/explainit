@@ -90,14 +90,18 @@ function isCodexConfigPath(p: string, ctx: PolicyContext): boolean {
   return roots.some((r) => CODEX_FILES.some((f) => sameFile(path.join(r, f), p)));
 }
 
-/** True when the path has a `.git` directory segment (any depth). */
+/**
+ * True when the path has a `.git` directory segment (any depth). Segments are compared on the
+ * canonical path, which is case-folded on Windows: there `.GIT\config` and `.git\config` are the
+ * same file, so the check must not be fooled by the spelling.
+ */
 export function isInsideGitDir(p: string): boolean {
-  const parts = canonicalPath(p).split(/[\\/]+/);
+  const parts = norm(p).split(/[\\/]+/);
   return parts.slice(0, -1).includes('.git');
 }
 
 export function isGitInfoExclude(p: string): boolean {
-  const parts = canonicalPath(p).split(/[\\/]+/);
+  const parts = norm(p).split(/[\\/]+/);
   const n = parts.length;
   return n >= 3 && parts[n - 1] === 'exclude' && parts[n - 2] === 'info' && parts[n - 3] === '.git';
 }
@@ -108,7 +112,7 @@ export function isGitInfoExclude(p: string): boolean {
  * commands, so both are denied outright rather than handed to the agent's own prompt.
  */
 export function isGitHooksOrConfig(p: string): boolean {
-  const parts = canonicalPath(p).split(/[\\/]+/);
+  const parts = norm(p).split(/[\\/]+/);
   const i = parts.lastIndexOf('.git');
   if (i < 0 || i >= parts.length - 1) return false;
   if (parts[i + 1] === 'hooks') return true;

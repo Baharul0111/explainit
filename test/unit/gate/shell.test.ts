@@ -83,8 +83,12 @@ suite('gate/pure/shell: analyseCommand heuristics table', () => {
   });
 
   test('every written file is listed, code file or not, and cd / pushd / popd move the effective directory (F4)', () => {
-    const home = path.join(path.sep, 'people', 'me');
-    const cwd = path.join(path.sep, 'work', 'repo');
+    // The roots are built with path.resolve, not path.join: relative targets are resolved against the
+    // effective cwd, and on Windows path.resolve carries the current drive letter ("D:\\people\\me")
+    // while path.join does not ("\\people\\me"), which would make every expectation below disagree.
+    const home = path.resolve(path.sep, 'people', 'me');
+    const cwd = path.resolve(path.sep, 'work', 'repo');
+    assert.equal(path.resolve(home), home, 'the roots must already be fully resolved (drive letter and all)');
     const ctx = { cwd, home };
     const a = analyseCommand('cd ~/.claude && cat > settings.json', ctx);
     assert.deepEqual(a.enteredDirs, [path.join(home, '.claude')]);
@@ -109,15 +113,31 @@ suite('gate/pure/shell: analyseCommand heuristics table', () => {
     assert.deepEqual(analyseCommand('cd - && echo x > y', ctx).writeTargets, ['y'], 'after `cd -` the directory is unknown');
     assert.deepEqual(analyseCommand('chmod +x .git/hooks/pre-commit', ctx).writeTargets, [path.join(cwd, '.git', 'hooks', 'pre-commit')]);
     assert.deepEqual(analyseCommand('ln -s evil .git/hooks/pre-push', ctx).writeTargets, [path.join(cwd, '.git', 'hooks', 'pre-push')]);
-    assert.deepEqual(analyseCommand('echo x > $EXPLAINIT_HOME/state.json', { ...ctx, explainitHome: '/e' }).writeTargets, [path.join('/e', 'state.json')]);
-    assert.deepEqual(analyseCommand('echo x > $CODEX_HOME/hooks.json', { ...ctx, codexHome: '/c' }).writeTargets, [path.join('/c', 'hooks.json')]);
+    const explainitHome = path.resolve(path.sep, 'e');
+    const codexHome = path.resolve(path.sep, 'c');
+    assert.deepEqual(analyseCommand('echo x > $EXPLAINIT_HOME/state.json', { ...ctx, explainitHome }).writeTargets, [path.join(explainitHome, 'state.json')]);
+    assert.deepEqual(analyseCommand('echo x > $CODEX_HOME/hooks.json', { ...ctx, codexHome }).writeTargets, [path.join(codexHome, 'hooks.json')]);
     assert.deepEqual(analyseCommand('echo hello > /dev/null', ctx).writeTargets, []);
     assert.deepEqual(analyseCommand('ls -la', ctx).writeTargets, []);
   });
 
+  test('a Windows-spelled path survives tokenising, so a cd into one is still tracked (F4 on win32)', () => {
+    // `\` is a POSIX escape everywhere else, but inside a token that starts as a Windows path it is
+    // a separator: otherwise `cd C:\Users\me\.claude` would tokenise as `C:Usersme.claude` and the
+    // protected-directory check would never see it. This holds on every platform, so macOS proves it.
+    assert.deepEqual(tokenize('cd C:\\Users\\me\\.claude'), ['cd', 'C:\\Users\\me\\.claude']);
+    assert.deepEqual(tokenize('cd "C:\\Users\\me\\.claude"'), ['cd', 'C:\\Users\\me\\.claude']);
+    assert.deepEqual(tokenize('cp x \\\\srv\\share\\hooks.json'), ['cp', 'x', '\\\\srv\\share\\hooks.json']);
+    assert.deepEqual(tokenize('echo a\\ b'), ['echo', 'a b'], 'the POSIX escape still holds outside Windows paths');
+    const win = analyseCommand('cd C:\\Users\\me\\.claude && cat > settings.json');
+    assert.deepEqual(win.enteredDirs, [path.normalize('C:\\Users\\me\\.claude')]);
+    assert.deepEqual(win.writeTargets, [path.resolve(win.enteredDirs[0], 'settings.json')], 'the write resolves against the directory the command entered');
+  });
+
   test('git config: writes target .git/config, ~/.gitconfig for --global, or the --file argument; reads target nothing', () => {
-    const home = path.join(path.sep, 'people', 'me');
-    const cwd = path.join(path.sep, 'work', 'repo');
+    // path.resolve, so the roots carry the drive letter on Windows (see the F4 test above).
+    const home = path.resolve(path.sep, 'people', 'me');
+    const cwd = path.resolve(path.sep, 'work', 'repo');
     const ctx = { cwd, home };
     assert.deepEqual(analyseCommand('git config user.name "A B"', ctx).writeTargets, [path.join(cwd, '.git', 'config')]);
     assert.deepEqual(analyseCommand('git config --add remote.origin.fetch x', ctx).writeTargets, [path.join(cwd, '.git', 'config')]);

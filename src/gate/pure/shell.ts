@@ -90,6 +90,18 @@ export function splitSegments(command: string): string[] {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * Inside a token that has already started as a Windows path (`C:` / `C:\x`, or a UNC `\\srv`), a
+ * backslash is a separator, not a POSIX escape. Without this, `cd C:\Users\me\.claude` would
+ * tokenise as `C:Usersme.claude` and the protected-directory check would never see the path.
+ * Everywhere else the POSIX rule stands (`a\ b` is one token holding a space).
+ */
+function inWindowsPath(cur: string, next: string): boolean {
+  if (/^[a-zA-Z]:/.test(cur)) return true; // C:\Users\me
+  if (cur === '' && next === '\\') return true; // the first slash of a UNC path (\\srv\share)
+  return cur.startsWith('\\'); // ...and the rest of it (a token can only start with `\` that way)
+}
+
 /** Tokenise a shell segment: whitespace-separated, quotes grouped, quotes stripped. */
 export function tokenize(segment: string): string[] {
   const out: string[] = [];
@@ -100,7 +112,7 @@ export function tokenize(segment: string): string[] {
     const ch = segment[i];
     if (quote) {
       if (ch === quote) quote = undefined;
-      else if (ch === '\\' && quote === '"' && i + 1 < segment.length) cur += segment[++i];
+      else if (ch === '\\' && quote === '"' && i + 1 < segment.length && !inWindowsPath(cur, segment[i + 1])) cur += segment[++i];
       else cur += ch;
       continue;
     }
@@ -109,7 +121,7 @@ export function tokenize(segment: string): string[] {
       has = true;
       continue;
     }
-    if (ch === '\\' && i + 1 < segment.length) {
+    if (ch === '\\' && i + 1 < segment.length && !inWindowsPath(cur, segment[i + 1])) {
       cur += segment[++i];
       has = true;
       continue;

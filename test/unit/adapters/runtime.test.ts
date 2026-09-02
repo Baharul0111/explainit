@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { sha256 } from '../../../src/core/hash';
 import { candidateNames, findOnPath, splitCliValue, wellKnownNodeLocations } from '../../../src/adapters/pure/pathLookup';
-import { cmdQuote, shQuote, wrapperCmdContent, wrapperNameFor, wrapperShContent } from '../../../src/adapters/pure/wrappers';
+import { cmdQuote, shPath, shQuote, wrapperCmdContent, wrapperNameFor, wrapperShContent } from '../../../src/adapters/pure/wrappers';
 import { resolveNodeRuntime, writeWrappers } from '../../../src/adapters/runtime';
 
 suite('adapters/pure/pathLookup', () => {
@@ -69,6 +69,21 @@ suite('adapters/pure/wrappers', () => {
     assert.ok(sh.includes('"/h/\\$weird \\"dir\\"/explainit-hook.js"'));
   });
 
+  test('sh wrapper writes Windows paths the way Git Bash reads them (forward slashes, no escapes)', () => {
+    // The .sh wrapper is what Git Bash / MSYS runs on Windows, and there `\` is an escape character:
+    // a backslash-spelled path would reach the hook mangled. The .cmd wrapper keeps the native path.
+    const win = { runtime: 'C:\\Program Files\\nodejs\\node.exe', script: 'C:\\Users\\me\\.explainit\\hooks\\explainit-hook.js', electron: false, explainitHome: 'C:\\Users\\me\\.explainit' };
+    const sh = wrapperShContent(win);
+    assert.ok(sh.includes('EXPLAINIT_HOME="C:/Users/me/.explainit"\nexport EXPLAINIT_HOME\n'), sh);
+    assert.ok(sh.endsWith('exec "C:/Program Files/nodejs/node.exe" "C:/Users/me/.explainit/hooks/explainit-hook.js" "$@"\n'), sh);
+    assert.ok(!sh.includes('\\'), 'no backslash survives into the POSIX wrapper: ' + sh);
+    assert.ok(wrapperCmdContent(win).includes('set "EXPLAINIT_HOME=C:\\Users\\me\\.explainit"'), 'the .cmd wrapper pins the native path');
+    // UNC paths keep their leading double slash; POSIX paths (where `\` is a legal character) are untouched.
+    assert.strictEqual(shPath('\\\\srv\\share\\home'), '//srv/share/home');
+    assert.strictEqual(shPath('/Users/me/.explainit'), '/Users/me/.explainit');
+    assert.strictEqual(shPath('/h/a\\b'), '/h/a\\b');
+  });
+
   test('cmd wrapper uses CRLF, @echo off, %*, pins EXPLAINIT_HOME and the electron flag only when needed', () => {
     const cmd = wrapperCmdContent({ runtime: 'C:\\Program Files\\nodejs\\node.exe', script: 'C:\\Users\\me\\.explainit\\hooks\\explainit-hook.js', electron: false, explainitHome: 'C:\\Users\\me\\.explainit' });
     assert.ok(cmd.startsWith('@echo off\r\n'));
@@ -109,15 +124,16 @@ suite('adapters/runtime', () => {
       const w = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'));
       assert.strictEqual(w.sh.path, path.join(dir, 'explainit-hook.sh'));
       assert.strictEqual(w.cmd.path, path.join(dir, 'explainit-hook.cmd'));
-      // The home defaults to the parent of the hooks folder and is pinned into both wrappers.
-      assert.ok(fs.readFileSync(w.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.dirname(dir)}"`));
-      assert.ok(fs.readFileSync(w.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.dirname(dir)}"`));
+      // The home defaults to the parent of the hooks folder and is pinned into both wrappers: the
+      // .sh one in the POSIX spelling (Git Bash on Windows), the .cmd one as the native path.
+      assert.ok(fs.readFileSync(w.sh.path, 'utf8').includes(`EXPLAINIT_HOME=${shQuote(shPath(path.dirname(dir)))}`), 'the .sh wrapper exports the home');
+      assert.ok(fs.readFileSync(w.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.dirname(dir)}"`), 'the .cmd wrapper sets the home');
       assert.strictEqual(sha256(fs.readFileSync(w.sh.path)), w.sh.hash);
       assert.strictEqual(sha256(fs.readFileSync(w.cmd.path)), w.cmd.hash);
       if (process.platform !== 'win32') assert.ok(fs.statSync(w.sh.path).mode & 0o100, 'sh wrapper is executable');
       // An explicit home is pinned instead, and the returned hashes follow the new content.
       const pinned = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'), path.join(dir, 'other-home'));
-      assert.ok(fs.readFileSync(pinned.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.join(dir, 'other-home')}"`));
+      assert.ok(fs.readFileSync(pinned.sh.path, 'utf8').includes(`EXPLAINIT_HOME=${shQuote(shPath(path.join(dir, 'other-home')))}`));
       assert.ok(fs.readFileSync(pinned.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.join(dir, 'other-home')}"`));
       assert.strictEqual(sha256(fs.readFileSync(pinned.sh.path)), pinned.sh.hash);
       assert.strictEqual(sha256(fs.readFileSync(pinned.cmd.path)), pinned.cmd.hash);

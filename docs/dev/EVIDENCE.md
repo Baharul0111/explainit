@@ -6,13 +6,13 @@ This file is updated with every verification run. Commands are exact; counts com
 
 | Suite | Command | Result |
 |---|---|---|
-| Unit (all modules + eval + install-smoke helpers) | `npm run test:unit` | 999 passing, 0 failing (local macOS, 2026-09-02) |
-| Hook conformance (hook script against a stub gate) | `npm run test:conformance` | 29 passing |
-| VS Code integration (extension activated in a real VS Code, fixture workspace) | `npm run test:integration` | 91 passing, 0 failing, twice in a row on a fresh ExplainIT home |
+| Unit (all modules + eval + install-smoke helpers) | `npm run test:unit` | 1065 passing, 0 failing (local macOS, 2026-09-02 evening; CI Linux/macOS green) |
+| Hook conformance (hook script against a stub gate, incl. rogue-home redirect, wrapper execution, Codex deny/passthrough) | `npm run test:conformance` | 36 passing |
+| VS Code integration (extension activated in a real VS Code, fixture workspace) | `npm run test:integration` | 98 passing, 0 failing (local; CI Linux and macOS green in run 5) |
 | Fresh-install smoke (VSIX into a fresh VS Code user-data-dir) | `npm run package && node scripts/check-vsix.js && npm run test:install` | PASS, 26 checks including a full checkpoint round trip through the installed hook wrapper (reject -> deny with the reason, accept -> allow with a restore point); VSIX 27 files, 1.7 MB |
 | Real agents (env-gated, spends credits) | `EXPLAINIT_REAL_AGENTS=1 npx mocha --ui tdd out/test/conformance/real-agents.test.js` | Claude Code CLI on PATH: deny stops the edit before disk, allow lets it land (pass). Claude binary bundled in the Claude Code VS Code extension: same two scenarios pass. Codex hooks/list trust conformance (PATH 0.152.0 and the bundled 0.151): pass. Codex `exec` deny/allow (4 tests): blocked on this Mac by a revoked Codex sign-in (`codex login` needed); the hook wiring itself is proven by the trust checks and the hook conformance suite. |
 | Explanation quality eval (REQ-020) | `npm run eval -- --channel <claude|codex|fake> --update-baseline` | claude 12/12 pass@1, 12/12 style; codex 12/12, 12/12; fake 11/12, 12/12 (eval/baseline.json, prompt hash locked by eval/baseline.test.ts) |
-| CI, three operating systems | `.github/workflows/ci.yml` on push | run 3 pending at the time of writing (see the Actions tab of Baharul0111/explainit) |
+| CI, three operating systems | `.github/workflows/ci.yml` on push | Run 5 (commit 0840a00+): Linux and macOS jobs green end to end (lint, unit, conformance, integration, package, check-vsix, install smoke); Windows unit stage failed on five new path-expectation tests, fixed in the following commit (see the Actions tab for the latest run) |
 
 ## Goal items ("What it must do") -> proof
 
@@ -36,3 +36,11 @@ This file is updated with every verification run. Commands are exact; counts com
 
 Publishing to the Marketplace and Open VSX (`scripts/release-checklist.md`, `.github/workflows/release.yml`) waits for the explicit go-ahead.
 Codex real-agent `exec` scenarios need `codex login` on this Mac (sign-in was revoked server-side on 2026-09-02).
+
+## Security hardening evidence (docs/dev/SECURITY-REVIEW.md)
+
+- Rogue-home redirect (F1): `test/conformance/hook.test.ts` "rogue EXPLAINIT_HOME ... never contacted with --home"; unit tests assert every installed hook command pins `--home`, `--claude-home`, `--codex-home` and the wrappers export `EXPLAINIT_HOME`.
+- Git hooks/config (F2), cd-relocated shell writes (F4): `test/unit/gate/policy.test.ts`, `test/unit/gate/shell.test.ts`, `test/conformance/hook.test.ts` (17 denied / 10 allowed shell cases).
+- Decision-memory expiry and no-session isolation (F3): `test/unit/review/memory.test.ts`, `test/unit/gate/controller.test.ts`.
+- Forged PostToolUse ignored (F5), pending cap (F7), twin re-render (F8), pre-write realpath re-check (F10): `test/unit/gate/controller.test.ts`, `test/unit/gate/server.test.ts`.
+- Session-start integrity pass (goal item 8): `test/unit/adapters/startup.test.ts`, wired in `src/extension.ts`.

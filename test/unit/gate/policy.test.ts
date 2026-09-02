@@ -348,9 +348,32 @@ suite('gate/pure/policy', () => {
       const pushd = hitOf('pushd ~/.codex; tee hooks.json');
       assert.equal(pushd?.kind, 'directory');
       assert.equal(pushd?.path, path.join(userHome, '.codex'));
-      assert.equal(hitOf(`cd ${home}/hooks && ls`)?.kind, 'directory');
+      // An absolute path spelled either way: as the shell would write it (forward slashes) and as
+      // Windows writes it (backslashes, drive letter). `home` comes from path.resolve, so on Windows
+      // it carries the drive letter that the analyser's own path.resolve adds to relative targets.
+      assert.equal(path.resolve(home), home, 'the sandbox roots are fully resolved paths');
+      assert.equal(hitOf(`cd ${home.replace(/\\/g, '/')}/hooks && ls`)?.kind, 'directory', 'POSIX spelling');
+      assert.equal(hitOf(`cd ${home}${path.sep}hooks && ls`)?.kind, 'directory', 'native spelling');
       assert.equal(hitOf('cd .git/hooks && ls')?.kind, 'directory');
       assert.equal(hitOf('bash -c "cd ~/.claude && cat > settings.json"')?.kind, 'directory');
+    });
+
+    test('Windows spellings are protected too: drive letters, backslashes and (on win32) any case', () => {
+      // Runs on every platform: the analyser and the policy both understand `C:\...` paths, so the
+      // Windows behaviour is proved here rather than only on a Windows runner.
+      const winCtx: PolicyContext = { explainitHome: 'C:\\Users\\me\\.explainit', userHome: 'C:\\Users\\me', folders: ['C:\\work\\repo'] };
+      const winHit = (cmd: string, cwd = 'C:\\work\\repo') => shellProtectedTarget(analyseCommand(cmd, { cwd, home: 'C:\\Users\\me' }), winCtx);
+      assert.equal(winHit('cd C:\\Users\\me\\.claude && cat > settings.json')?.kind, 'directory');
+      assert.equal(winHit('cd "C:\\Users\\me\\.explainit\\sessions" && echo x > 1.json')?.kind, 'directory');
+      assert.equal(winHit('cd C:\\work\\repo\\.git\\hooks && ls')?.kind, 'directory');
+      assert.equal(isProtectedDirectory('C:\\Users\\me\\.codex\\sub', winCtx), true);
+      assert.equal(isProtectedDirectory('C:\\work\\repo\\src', winCtx), false);
+      if (process.platform === 'win32') {
+        // Windows file names are case-insensitive, so `.GIT\config` is `.git\config`.
+        assert.equal(isGitHooksOrConfig('C:\\work\\repo\\.GIT\\Config'), true);
+        assert.equal(isGitInfoExclude('C:\\work\\repo\\.Git\\info\\exclude'), true);
+        assert.equal(isInsideGitDir('C:\\work\\repo\\.GIT\\refs\\heads\\main'), true);
+      }
     });
 
     test('isProtectedDirectory: the ExplainIT home, the user-layer .claude / .codex folders, CODEX_HOME, and any .claude / .codex / .explainit / .git folder', () => {

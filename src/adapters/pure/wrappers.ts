@@ -27,6 +27,17 @@ export function cmdQuote(s: string): string {
   return '"' + s.replace(/"/g, '') + '"';
 }
 
+/**
+ * How a path is spelled inside the POSIX wrapper. On Windows the `.sh` wrapper is what Git Bash /
+ * MSYS runs, and there a backslash is an escape character, not a separator: `"C:\Users\me"` would
+ * reach the hook as `C:Usersme`. Node, cmd.exe and the Windows APIs all accept forward slashes, so
+ * drive paths (`C:\x`) and UNC paths (`\\srv\share`) are written with `/`. A POSIX path is left
+ * exactly as it is, because there a backslash is a legal character in a file name.
+ */
+export function shPath(p: string): string {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') ? p.replace(/\\/g, '/') : p;
+}
+
 export function wrapperShContent(i: WrapperInput): string {
   const lines = [
     '#!/bin/sh',
@@ -37,10 +48,11 @@ export function wrapperShContent(i: WrapperInput): string {
     lines.push('ELECTRON_RUN_AS_NODE=1');
     lines.push('export ELECTRON_RUN_AS_NODE');
   }
-  // Pinned at install time: whatever the calling shell exported is overridden here.
-  lines.push(`EXPLAINIT_HOME=${shQuote(i.explainitHome)}`);
+  // Pinned at install time: whatever the calling shell exported is overridden here. Paths are
+  // written in the POSIX spelling because /bin/sh (Git Bash on Windows) reads backslashes as escapes.
+  lines.push(`EXPLAINIT_HOME=${shQuote(shPath(i.explainitHome))}`);
   lines.push('export EXPLAINIT_HOME');
-  lines.push(`exec ${shQuote(i.runtime)} ${shQuote(i.script)} "$@"`);
+  lines.push(`exec ${shQuote(shPath(i.runtime))} ${shQuote(shPath(i.script))} "$@"`);
   return lines.join('\n') + '\n';
 }
 

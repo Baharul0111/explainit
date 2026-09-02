@@ -14,6 +14,7 @@ import { CodexAdapter } from '../../../src/adapters/codex';
 import { makeAdapterEnv, userHomeDir, type AdapterEnv, type HostProbe } from '../../../src/adapters/installer';
 import { codexHookHash, codexHookStateHeader } from '../../../src/adapters/pure/codexTrust';
 import { findOurEntries } from '../../../src/adapters/pure/hookConfig';
+import { shPath, shQuote } from '../../../src/adapters/pure/wrappers';
 
 const REPO = path.resolve(__dirname, '..', '..', '..', '..');
 const HOOK_SRC = path.join(REPO, 'hooks', 'explainit-hook.js');
@@ -104,8 +105,13 @@ suite('adapters/installer (claude + codex round trip)', function () {
       assert.ok(e.command.includes(`--codex-home "${path.join(sb.env.userHome, '.codex')}"`), e.command);
     }
     assert.ok(!ours[0].command.includes('--unresponsive'), 'Claude keeps its own ask fallback');
+    // Both wrappers pin the home on every platform: the POSIX one in the spelling Git Bash reads
+    // (forward slashes on Windows, where `\` is an escape), the .cmd one as the native path.
+    const pinnedHome = path.resolve(sb.env.explainitHome);
     const wrapper = fs.readFileSync(path.join(sb.env.hooksDir, 'explainit-hook.sh'), 'utf8');
-    assert.ok(wrapper.includes(`EXPLAINIT_HOME="${sb.env.explainitHome}"`), 'the wrapper pins EXPLAINIT_HOME');
+    assert.ok(wrapper.includes(`EXPLAINIT_HOME=${shQuote(shPath(pinnedHome))}\nexport EXPLAINIT_HOME\n`), 'the .sh wrapper pins EXPLAINIT_HOME: ' + wrapper);
+    const cmdWrapper = fs.readFileSync(path.join(sb.env.hooksDir, 'explainit-hook.cmd'), 'utf8');
+    assert.ok(cmdWrapper.includes(`set "EXPLAINIT_HOME=${pinnedHome}"`), 'the .cmd wrapper pins EXPLAINIT_HOME: ' + cmdWrapper);
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.js')));
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.sh')));
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.cmd')));
