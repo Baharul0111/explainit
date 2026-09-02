@@ -405,7 +405,7 @@ export class TwinEngineImpl implements TwinEngine {
     }
     const map = await this.functionMap(doc);
     const plan = planSections(map, sidecar, parsed, { kind: 'changed' });
-    return { sourcePath: abs, twinPath, map, plan, request: this.requestFor(doc, map, plan.toGenerate, false), fresh: false };
+    return { sourcePath: abs, twinPath, map, plan, request: this.requestFor(doc, map, plan.toGenerate), fresh: false };
   }
 
   /** Generate for a file on disk (backfill). */
@@ -438,7 +438,13 @@ export class TwinEngineImpl implements TwinEngine {
     return withTimeout(p, STRUCTURE_TIMEOUT_MS, what, token);
   }
 
-  private requestFor(doc: TextDocumentLike, map: FunctionMap, entries: readonly PlanEntry[], bypassCache: boolean): ExplainRequest {
+  /**
+   * The request for a batch of functions. The content hash is always the function's REAL hash so the
+   * router's cache stays keyed by code; a forced regeneration asks the router to skip the cache through
+   * `GenerationOptions.bypassCache` instead of salting the key (a salted key would store the fresh
+   * explanation under a hash nothing can ever look up again).
+   */
+  private requestFor(doc: TextDocumentLike, map: FunctionMap, entries: readonly PlanEntry[]): ExplainRequest {
     const text = doc.getText();
     const thrift = this.deps.settings.get('tokenThrift');
     const summary = thrift ? fileSummaryOf(text, map.functions) : fileSummaryOf(text, map.functions, 40, 4000);
@@ -450,8 +456,7 @@ export class TwinEngineImpl implements TwinEngine {
         functionId: e.fn.id,
         name: e.fn.name,
         text: functionText(text, e.fn),
-        // A salted key makes the router's cache miss on purpose (fresh wording was requested).
-        contentHash: bypassCache ? sha256(`${e.fn.contentHash}:regen:${Date.now()}`) : e.fn.contentHash,
+        contentHash: e.fn.contentHash,
       })),
     };
   }
@@ -488,7 +493,7 @@ export class TwinEngineImpl implements TwinEngine {
 
     // When the naming rule switched form (a sibling with the same stem appeared or went away) the old
     // twin still holds every explanation: reuse it, then remove it once the new one is written.
-    const previousTwinPath = sidecar && isTwinPath(sidecar.twinPath) && !samePath(sidecar.twinPath, twinPath) && (await exists(sidecar.twinPath)) ? sidecar.twinPath : undefined;
+    let previousTwinPath = sidecar && isTwinPath(sidecar.twinPath) && !samePath(sidecar.twinPath, twinPath) && (await exists(sidecar.twinPath)) ? sidecar.twinPath : undefined;
     const parsed = twinExists ? await this.readParsedTwin(twinPath) : previousTwinPath ? await this.readParsedTwin(previousTwinPath) : undefined;
 
     // FAST PATH (goal item 14): unchanged source + complete existing twin -> just open it, no structure call.
@@ -519,7 +524,12 @@ export class TwinEngineImpl implements TwinEngine {
       };
       await writeSidecar(sidecarFile, next);
       this.remember({ source: key, twinPath, sidecar: next, map, mapKey });
-      if (previousTwinPath) await this.removeOldTwin(previousTwinPath, twinPath);
+      if (previousTwinPath) {
+        // Once, after the first successful write of the new twin (commit runs again while streaming).
+        const old = previousTwinPath;
+        previousTwinPath = undefined;
+        await this.removeOldTwin(old, twinPath);
+      }
       return this.toTwinFile(doc.uri, twinPath, next);
     };
 
@@ -610,12 +620,13 @@ export class TwinEngineImpl implements TwinEngine {
       const byId = new Map(batch.map((e) => [e.fn.id, e]));
       const byName = new Map(batch.map((e) => [e.fn.name, e]));
       const resolve = (exp: Explanation): string | undefined => byId.get(exp.functionId)?.fn.id ?? byName.get(exp.name)?.fn.id;
-      const req = this.requestFor(doc, map, batch, !!opts.bypassCache);
+      const req = this.requestFor(doc, map, batch);
       try {
         const results = await withTimeout(
           this.deps.router.explainFunctions(req, {
             token: opts.token,
             timeoutMs,
+            ...(opts.bypassCache ? { bypassCache: true } : {}),
             progress: {
               onExplanation: (exp) => {
                 const id = resolve(exp);
@@ -685,14 +696,42 @@ export class TwinEngineImpl implements TwinEngine {
         this.log.debug('editor write failed; writing the file directly', e);
       }
     }
-    await fs.promises.mkdir(path.dirname(twinPath), { recursive: true });
     const tmp = `${twinPath}.${process.pid}.tmp`;
-    await fs.promises.writeFile(tmp, text, 'utf8');
     try {
-      await fs.promises.rename(tmp, twinPath);
-    } catch {
-      await fs.promises.writeFile(twinPath, text, 'utf8');
+      await fs.promises.mkdir(path.dirname(twinPath), { recursive: true });
+      await fs.promises.writeFile(tmp, text, 'utf8');
+      try {
+        await fs.promises.rename(tmp, twinPath);
+      } catch {
+        // Windows can refuse to rename over a file another program holds open: write in place instead.
+        await fs.promises.writeFile(twinPath, text, 'utf8');
+      }
+    } catch (e) {
+      throw new Error(`ExplainIT could not write ${path.basename(twinPath)} next to the code (${errorMessage(e)}). Check that the folder is writable and that nothing else uses that file name.`);
+    } finally {
       await fs.promises.unlink(tmp).catch(() => undefined);
+    }
+  }
+
+  /**
+   * The naming rule switched form for this source (`app_explain.txt` <-> `app.py_explain.txt`) and the
+   * new twin has been written: drop the old file so two twins never sit beside one source. Best effort;
+   * a tab still showing the old twin is closed so it does not linger as a "deleted" editor.
+   */
+  private async removeOldTwin(oldTwinPath: string, newTwinPath: string): Promise<void> {
+    if (samePath(oldTwinPath, newTwinPath)) return;
+    this.twinToSource.delete(canonicalPath(oldTwinPath));
+    try {
+      const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.input instanceof vscode.TabInputText && samePath(t.input.uri.fsPath, oldTwinPath));
+      if (tabs.length) await vscode.window.tabGroups.close(tabs, true);
+    } catch (e) {
+      this.log.debug('could not close the old twin tab', e);
+    }
+    try {
+      await fs.promises.unlink(oldTwinPath);
+      this.log.info(`renamed twin: removed ${path.basename(oldTwinPath)} in favour of ${path.basename(newTwinPath)}`);
+    } catch (e) {
+      this.log.debug(`old twin ${oldTwinPath} could not be removed`, e);
     }
   }
 

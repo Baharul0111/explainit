@@ -99,6 +99,9 @@ jobs:
           test -f "${{ steps.version.outputs.vsix }}" || { echo "Expected ${{ steps.version.outputs.vsix }} in the repo root"; ls -la *.vsix || true; exit 1; }
           ls -la "${{ steps.version.outputs.vsix }}"
 
+      - name: The VSIX contains only what ships (no sources, tests, scratch folders or .env)
+        run: node scripts/check-vsix.js "${{ steps.version.outputs.vsix }}"
+
       - name: Upload the VSIX as a workflow artifact
         uses: actions/upload-artifact@v4
         with:

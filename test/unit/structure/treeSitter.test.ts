@@ -216,6 +216,44 @@ suite('structure/pure/treeSitter', function () {
     assert.ok(elapsed < 1000, `took ${elapsed}ms`);
   });
 
+  test('a runtime that throws while parsing is reported as unavailable, not thrown, and is retried fresh next time', async () => {
+    let parsers = 0;
+    let parses = 0;
+    const fake = {
+      Parser: class {
+        static init(): Promise<void> {
+          return Promise.resolve();
+        }
+        constructor() {
+          parsers++;
+        }
+        reset(): void {}
+        setLanguage(): void {}
+        parse(): never {
+          parses++;
+          throw new Error('wasm aborted (out of memory)');
+        }
+        delete(): void {}
+      },
+      Language: { load: async () => ({}) },
+    };
+    const throwing = new TreeSitterService({ wasmDir: wasmDir!, loadModule: () => fake as never });
+    assert.equal(await throwing.parseFunctions('def f(): pass\nx = 1', 'python'), undefined);
+    assert.equal(await throwing.parseFunctions('def g(): pass\nx = 1', 'python'), undefined);
+    assert.equal(parses, 2);
+    assert.equal(parsers, 2, 'a parser that threw is discarded and a fresh one is created for the next call');
+    throwing.dispose();
+  });
+
+  test('texts over the size cap are skipped (so the host never freezes) and the caller can fall back', async () => {
+    const capped = new TreeSitterService({ wasmDir: wasmDir!, maxTextChars: 100 });
+    const small = 'def f():\n    return 1\n';
+    assert.ok((await capped.parseFunctions(small, 'python'))!.functions.length === 1);
+    assert.equal(await capped.parseFunctions(small.repeat(10), 'python'), undefined);
+    assert.equal(await capped.parseFunctions(undefined as unknown as string, 'python'), undefined);
+    capped.dispose();
+  });
+
   test('a broken runtime load is reported as unavailable, not thrown', async () => {
     const broken = new TreeSitterService({
       wasmDir: wasmDir!,

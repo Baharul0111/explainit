@@ -161,14 +161,30 @@ export interface TrustLookup {
   detail: string;
 }
 
+/** Path comparison the way the trust key is written: forward slashes, case-folded on Windows/macOS. */
+function foldPath(p: string): string {
+  const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' || process.platform === 'darwin' ? norm.toLowerCase() : norm;
+}
+
 /**
  * Looks up the trust record for one of our handlers. Codex keys the record by the hooks.json path
- * (as Codex displays it), so we match leniently on the path (it must end in `.codex/hooks.json`)
- * and strictly on event/group/handler indexes and the hash.
+ * (its canonical/real path, as Codex displays it) plus `:<event>:<group>:<handler>`. When
+ * `hooksJsonPaths` is given (the path we installed to, real and as-configured) the key source must
+ * equal one of them; otherwise any source named `hooks.json` counts. Indexes and hash are strict.
  */
-export function lookupTrust(states: Record<string, HookState>, event: 'PreToolUse' | 'PostToolUse', groupIndex: number, handlerIndex: number, expectedHash: string): TrustLookup {
+export function lookupTrust(
+  states: Record<string, HookState>,
+  event: 'PreToolUse' | 'PostToolUse',
+  groupIndex: number,
+  handlerIndex: number,
+  expectedHash: string,
+  hooksJsonPaths?: string[],
+): TrustLookup {
   const suffix = `:${codexEventLabel(event)}:${groupIndex}:${handlerIndex}`;
-  const keys = Object.keys(states).filter((k) => k.endsWith(suffix) && /[\\/]\.codex[\\/]hooks\.json$/i.test(k.slice(0, -suffix.length)));
+  const wanted = (hooksJsonPaths ?? []).map(foldPath);
+  const sourceMatches = (source: string): boolean => (wanted.length ? wanted.includes(foldPath(source)) : /(^|[\\/])hooks\.json$/i.test(source));
+  const keys = Object.keys(states).filter((k) => k.endsWith(suffix) && sourceMatches(k.slice(0, -suffix.length)));
   if (keys.length === 0) return { status: 'untrusted', detail: 'Codex has no trust record for the ExplainIT hook yet.' };
   for (const key of keys) {
     const s = states[key];

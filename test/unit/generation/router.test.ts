@@ -5,7 +5,7 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { CONSENT_ERROR, createRouter } from '../../../src/generation/router';
+import { CONSENT_ERROR, MAX_FUNCTION_CHARS, MAX_SEGMENT_CHARS, OVERSIZED_SUMMARY, chunkFunctions, createRouter } from '../../../src/generation/router';
 import { createGenerationRouter, createFileCache, createConsentStore, promptHash } from '../../../src/generation';
 import { FALLBACK_SUMMARY, isFallbackExplanation } from '../../../src/generation/pure/parse';
 import { REASK_PREFACE, splitFence } from '../../../src/generation/pure/prompts';
@@ -15,7 +15,7 @@ import type { Disposable } from '../../../src/core/interfaces';
 import type { Explanation } from '../../../src/core/types';
 import { FAKE_CLAUDE, FAKE_CODEX, FIXTURE_WORKSPACE, channelError, consent, fakeChannel, fn, goodReplyFor, manyFunctions, memoryCache, request, rmDir, settings, silentLogger, tmpDir, type FakeChannel } from './helpers';
 
-function makeRouter(channels: FakeChannel[], opts: { consent?: boolean; settings?: Parameters<typeof settings>[0]; logLines?: string[]; ttl?: number; probeMs?: number } = {}) {
+function makeRouter(channels: FakeChannel[], opts: { consent?: boolean; settings?: Parameters<typeof settings>[0]; logLines?: string[]; ttl?: number; probeMs?: number; waitMs?: number; graceMs?: number } = {}) {
   const cache = memoryCache();
   const disposables: Disposable[] = [];
   const c = consent(opts.consent !== false);
@@ -30,6 +30,8 @@ function makeRouter(channels: FakeChannel[], opts: { consent?: boolean; settings
     channels,
     availabilityTtlMs: opts.ttl,
     availabilityProbeMs: opts.probeMs,
+    availabilityWaitMs: opts.waitMs,
+    timeoutGraceMs: opts.graceMs,
   });
   return { router, cache, consent: c, disposables };
 }
@@ -73,6 +75,135 @@ suite('generation/router', () => {
     const inside = splitFence(claude.calls[1].combined)!.inside;
     assert.ok(inside.includes('const add'));
     assert.ok(!inside.includes('function slugify'));
+  });
+
+  test('bypassCache skips the lookup and overwrites the cached copy with the fresh result', async () => {
+    let call = 0;
+    const claude = fakeChannel('claude', {
+      reply: (req) => {
+        call++;
+        const good = JSON.parse(goodReplyFor(req.combined));
+        for (const e of good.explanations) e.summary = `It does its job for ${e.name}, take ${call}.`;
+        return JSON.stringify(good);
+      },
+    });
+    const { router, cache } = makeRouter([claude]);
+    const f = fn('slugify', 'function slugify() {}');
+    const first = await router.explainFunctions(request([f]));
+    assert.equal(first[0].summary, 'It does its job for slugify, take 1.');
+    assert.equal(cache.get(f.contentHash)?.summary, 'It does its job for slugify, take 1.');
+    // Plain call: cache hit, no model call.
+    await router.explainFunctions(request([f]));
+    assert.equal(claude.calls.length, 1);
+    // Regenerate: the cached copy is skipped AND replaced.
+    const seen: Explanation[] = [];
+    const fresh = await router.explainFunctions(request([f]), { bypassCache: true, progress: { onExplanation: (e) => seen.push(e) } });
+    assert.equal(claude.calls.length, 2, 'the model was asked again');
+    assert.equal(fresh[0].summary, 'It does its job for slugify, take 2.');
+    assert.equal(seen.length, 1);
+    assert.equal(cache.size(), 1);
+    assert.equal(cache.get(f.contentHash)?.summary, 'It does its job for slugify, take 2.', 'cache overwritten');
+    // And the next plain call uses the fresh copy.
+    assert.equal((await router.explainFunctions(request([f])))[0].summary, 'It does its job for slugify, take 2.');
+    assert.equal(claude.calls.length, 2);
+    // A bad reply under bypassCache does not clobber the good cached copy.
+    const bad = fakeChannel('claude', { reply: () => 'PWNED' });
+    const r2 = makeRouter([bad]);
+    r2.cache.set(f.contentHash, first[0]);
+    const out = await r2.router.explainFunctions(request([f]), { bypassCache: true });
+    assert.ok(isFallbackExplanation(out[0]));
+    assert.equal(r2.cache.get(f.contentHash)?.summary, first[0].summary);
+  });
+
+  test('a function longer than MAX_FUNCTION_CHARS gets an honest section without any model call and is not cached', async () => {
+    const claude = fakeChannel('claude');
+    const lines: string[] = [];
+    const { router, cache } = makeRouter([claude], { logLines: lines });
+    const huge = fn('minified', 'x'.repeat(MAX_FUNCTION_CHARS + 1));
+    const small = fn('add', 'const add = () => 1;');
+    const seen: Explanation[] = [];
+    const out = await router.explainFunctions(request([huge, small]), { progress: { onExplanation: (e) => seen.push(e) } });
+    assert.equal(out.length, 2);
+    assert.equal(out[0].summary, OVERSIZED_SUMMARY);
+    assert.equal(out[0].modelChannel, 'none');
+    assert.ok(out[0].steps.length >= 2 && out[0].steps.length <= 5);
+    assert.equal(out[1].summary, 'It does its job for add.');
+    assert.equal(claude.calls.length, 1);
+    assert.ok(!splitFence(claude.calls[0].combined)!.inside.includes('xxxxxxxxxx'), 'the huge text never reached the model');
+    assert.equal(cache.size(), 1);
+    assert.ok(!cache.has(huge.contentHash));
+    assert.equal(seen.length, 2);
+    assert.ok(lines.some((l) => /minified .* characters long/.test(l)));
+    // Only huge functions: no consent needed, no channel touched.
+    const r2 = makeRouter([fakeChannel('claude')], { consent: false });
+    assert.equal((await r2.router.explainFunctions(request([huge])))[0].summary, OVERSIZED_SUMMARY);
+  });
+
+  test('chunks are also cut by total text size so a few big functions never share one request', async () => {
+    const big = (i: number) => fn(`big${i}`, 'y'.repeat(60_000));
+    assert.equal(chunkFunctions([big(1), big(2), big(3)], 20, 150_000).length, 2);
+    assert.equal(chunkFunctions([big(1), big(2), big(3)], 20, 50_000).length, 3, 'one per chunk when each exceeds the budget');
+    assert.deepEqual(chunkFunctions([], 20), []);
+    assert.equal(chunkFunctions(manyFunctions(45), 20).length, 3);
+    const claude = fakeChannel('claude');
+    const { router } = makeRouter([claude]);
+    const out = await router.explainFunctions(request([big(1), big(2), big(3)]));
+    assert.equal(claude.calls.length, 2);
+    assert.ok(out.every((e) => !isFallbackExplanation(e)));
+  });
+
+  test('segmentWithAi refuses a file too large to outline with a clear error and no model call', async () => {
+    const claude = fakeChannel('claude');
+    const { router } = makeRouter([claude]);
+    await assert.rejects(router.segmentWithAi({ fileName: 'huge.cob', languageId: 'cobol', text: 'z'.repeat(MAX_SEGMENT_CHARS + 1) }), /huge\.cob is too large/);
+    assert.equal(claude.calls.length, 0);
+  });
+
+  test('a channel that never answers is dropped after its timeout (plus retry and grace) and the next one is used', async () => {
+    const hung = fakeChannel('claude', { reply: () => new Promise<string>(() => undefined) });
+    const codex = fakeChannel('codex');
+    const lines: string[] = [];
+    const { router } = makeRouter([hung, codex], { logLines: lines, graceMs: 50 });
+    const started = Date.now();
+    const out = await router.explainFunctions(request(manyFunctions(1)), { timeoutMs: 60 });
+    assert.ok(Date.now() - started < 3000);
+    assert.equal(out[0].modelChannel, 'codex');
+    assert.equal(hung.calls.length, 1);
+    assert.equal(codex.calls.length, 1);
+    assert.ok(lines.some((l) => /claude could not answer \(timeout\)/.test(l)));
+  });
+
+  test('withdrawing or granting consent is reflected by availableChannels at once (no 60 s wait)', async () => {
+    const copilot = fakeChannel('copilot');
+    const { router, consent: c } = makeRouter([copilot]);
+    // Mimic the real Copilot channel: the answer depends on consent.
+    copilot.availability = async () => {
+      copilot.availabilityCalls++;
+      return c.granted() ? { channel: 'copilot', available: true } : { channel: 'copilot', available: false, reason: 'ExplainIT has not been given permission to use your assistants yet.' };
+    };
+    assert.equal((await router.availableChannels())[0].available, true);
+    c.value = false;
+    const a = await router.availableChannels();
+    assert.equal(a[0].available, false);
+    assert.match(a[0].reason ?? '', /permission/);
+    assert.equal(copilot.availabilityCalls, 2);
+    await router.availableChannels();
+    assert.equal(copilot.availabilityCalls, 2, 'cached while consent stays the same');
+    c.value = true;
+    assert.equal((await router.availableChannels())[0].available, true);
+    assert.equal(await router.resolveChannel(), 'copilot');
+  });
+
+  test('generation waits patiently for a slow probe instead of reporting "no assistant" after the fast cap', async () => {
+    const slow = fakeChannel('claude', { availabilityDelayMs: 600 });
+    const { router } = makeRouter([slow], { probeMs: 100, waitMs: 3000 });
+    const quick = await router.availableChannels();
+    assert.equal(quick[0].available, false);
+    assert.match(quick[0].reason ?? '', /Still checking/);
+    const out = await router.explainFunctions(request(manyFunctions(1)));
+    assert.equal(out[0].modelChannel, 'claude');
+    assert.equal(slow.availabilityCalls, 1, 'the in-flight probe was awaited, not restarted');
+    assert.equal((await router.availableChannels())[0].available, true);
   });
 
   test('empty request never touches consent or channels', async () => {

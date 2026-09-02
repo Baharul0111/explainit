@@ -58,10 +58,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
   const cache = createFileCache(cacheFile);
   disposables.push({ dispose: () => void cache.flush() });
 
-  let routerRef: ReturnType<typeof createGenerationRouter> | undefined;
-  const structure = createStructureEngine({ ...core, router: () => routerRef, disposables });
+  const routerBox: { router?: ReturnType<typeof createGenerationRouter> } = {};
+  const structure = createStructureEngine({ ...core, router: () => routerBox.router, disposables });
   const router = createGenerationRouter({ ...core, cache, consent, disposables });
-  routerRef = router;
+  routerBox.router = router;
   const twin = createTwinEngine({ ...core, structure, router, workspaceFolders, disposables });
   const review = createReviewPresenter({ ...core, extensionUri: context.extensionUri.toString(), disposables });
   const memory = createDecisionMemory();

@@ -18,10 +18,15 @@ import { VERSION_TIMEOUT_MS } from './claude';
 export const CODEX_TRUST_STEP =
   'Codex only runs hooks you have trusted: open codex in a terminal once, and when it shows the ExplainIT hook choose Trust (or type /hooks). The Codex VS Code extension uses the same trust record.';
 
+/** Codex keeps everything under CODEX_HOME when that is set, else ~/.codex (shared by the CLI and the VS Code extension). */
+export function codexHomeDir(env: Pick<AdapterEnv, 'userHome' | 'codexHome'>): string {
+  return env.codexHome ?? path.join(env.userHome, '.codex');
+}
+
 export const CODEX_SPEC: AgentAdapterSpec = {
   agent: 'codex',
   label: 'Codex',
-  configPath: (env) => path.join(env.userHome, '.codex', 'hooks.json'),
+  configPath: (env) => path.join(codexHomeDir(env), 'hooks.json'),
   specs: codexEntrySpecs,
   nextSteps: () => [CODEX_TRUST_STEP, 'Then run "ExplainIT: Doctor" to confirm the hook shows as trusted.'],
 };
@@ -32,7 +37,7 @@ export class CodexAdapter extends HookAgentBase {
   }
 
   configTomlPath(): string {
-    return path.join(this.env.userHome, '.codex', 'config.toml');
+    return path.join(codexHomeDir(this.env), 'config.toml');
   }
 
   resolveCli(): { cmd: string; args: string[] } | undefined {
@@ -82,7 +87,14 @@ export class CodexAdapter extends HookAgentBase {
     const states = parseHookStates(toml);
     const e = ours[0];
     const expected = codexHookHash('PreToolUse', e.matcher, { command: e.command, timeout: e.timeout });
-    return lookupTrust(states, 'PreToolUse', e.groupIndex, e.handlerIndex, expected);
+    // Codex writes the key with the real path of hooks.json (symlinks resolved), so accept both spellings.
+    let real = file;
+    try {
+      real = fs.realpathSync.native(file);
+    } catch {
+      /* keep the configured path */
+    }
+    return lookupTrust(states, 'PreToolUse', e.groupIndex, e.handlerIndex, expected, [file, real]);
   }
 
   protected override extraChecks(_rec: AdapterRecord): IntegrityCheck[] {
@@ -118,7 +130,7 @@ export class CodexAdapter extends HookAgentBase {
       else versionError = r.error ?? `exit code ${r.code}${r.stderr ? ': ' + r.stderr.trim().split('\n')[0] : ''}`;
     }
     const present = !!cli || !!ext;
-    const signedIn = isFile(path.join(this.env.userHome, '.codex', 'auth.json'));
+    const signedIn = isFile(path.join(codexHomeDir(this.env), 'auth.json'));
     let detail: string;
     if (!present) {
       detail = 'Codex was not found. Install the CLI (npm install -g @openai/codex) or the "Codex" VS Code extension (openai.chatgpt), run `codex login` once, then run "ExplainIT: Set up assistants" again.';

@@ -455,7 +455,7 @@
     "compile": "tsc -p ./",
     "lint": "eslint src test eval scripts",
     "typecheck": "tsc -p ./ --noEmit",
-    "test:unit": "npm run compile && mocha --ui tdd \"out/test/unit/**/*.test.js\" \"out/eval/**/*.test.js\" --timeout 30000",
+    "test:unit": "npm run compile && mocha --ui tdd \"out/test/unit/**/*.test.js\" \"out/eval/**/*.test.js\" \"out/test/install-smoke/test/**/*.test.js\" --timeout 60000",
     "test:conformance": "npm run compile && mocha --ui tdd \"out/test/conformance/**/*.test.js\" --timeout 180000",
     "test:integration": "npm run compile && npm run build:dev && vscode-test",
     "test:install": "npm run compile && node out/test/install-smoke/run.js",
@@ -463,7 +463,9 @@
     "package": "vsce package --no-dependencies",
     "eval": "npm run compile && node out/eval/run.js",
     "publish:marketplace": "vsce publish --no-dependencies",
-    "publish:openvsx": "ovsx publish --no-dependencies"
+    "publish:openvsx": "ovsx publish --no-dependencies",
+    "check:workflows": "node scripts/check-workflows.js",
+    "check:network": "node scripts/check-no-network.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

@@ -38,8 +38,17 @@ export interface AdapterEnv {
   explainitHome: string;
   hooksDir: string;
   userHome: string;
+  /** Codex's home when the person set CODEX_HOME (Codex honours it); undefined means <userHome>/.codex. */
+  codexHome?: string;
   platform: NodeJS.Platform;
   arch: string;
+}
+
+/** CODEX_HOME is honoured only for the real user home; test homes always use <userHome>/.codex. */
+export function codexHomeOverride(userHome: string): string | undefined {
+  const raw = process.env.CODEX_HOME;
+  if (!raw || !raw.trim() || userHome !== os.homedir()) return undefined;
+  return path.resolve(raw.trim());
 }
 
 /**
@@ -55,13 +64,15 @@ export function userHomeDir(): string {
 }
 
 export function makeAdapterEnv(core: { logger: Logger; settings: Settings; extensionPath: string; version: string }, state: StateStore, probe: HostProbe, overrides: Partial<AdapterEnv> = {}): AdapterEnv {
+  const userHome = overrides.userHome ?? userHomeDir();
   return {
     ...core,
     state,
     probe,
     explainitHome: explainitHome(),
     hooksDir: HOME_LAYOUT.hooks(),
-    userHome: userHomeDir(),
+    userHome,
+    codexHome: codexHomeOverride(userHome),
     platform: process.platform,
     arch: process.arch,
     ...overrides,

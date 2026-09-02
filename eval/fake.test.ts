@@ -7,9 +7,15 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { contentHashOf } from '../src/core/hash';
+import type { Disposable, ExplanationCache } from '../src/core/interfaces';
+import { createLogger } from '../src/core/log';
 import { inMemorySettings } from '../src/core/settings';
-import { EVAL_PATHS } from './paths';
-import { parseSubset } from './pure/humaneval';
+import type { Explanation } from '../src/core/types';
+import { createGenerationRouter } from '../src/generation';
+import { EVAL_PATHS, repoRoot } from './paths';
+import { buildTestProgram, functionTextForExplain, parseSubset, preambleForContext, splitPrompt } from './pure/humaneval';
+import { findPython, runPythonProgram } from './python';
 import { RESYNTH_TASK_HEADER, buildResynthPrompt, parseClaudeJsonReply, resynthesize } from './resynth';
 import { checkStyle } from './style';
 
@@ -91,6 +97,59 @@ suite('eval/fixtures/fake-claude.js', function () {
       assert.match(r.detail, /^claude setting \d+ms exit=0$/);
       assert.ok(fs.existsSync(path.join(home, 'tmp')), 'the CLI ran inside <home>/tmp');
     } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('the whole round trip runs through the real router prompts with the fake (no credits): explain -> style -> resynth -> tests', async function () {
+    this.timeout(60_000);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'explainit-fake-roundtrip-'));
+    const previousHome = process.env.EXPLAINIT_HOME;
+    process.env.EXPLAINIT_HOME = home; // the CLI's cwd is <home>/tmp, never the person's ~/.explainit
+    const disposables: Disposable[] = [];
+    try {
+      const settings = inMemorySettings({ claudeCliPath: `node ${EVAL_PATHS.fakeClaude()}`, channelPin: 'claude' });
+      const cacheMap = new Map<string, Explanation>();
+      const cache: ExplanationCache = { get: (h) => cacheMap.get(h), set: (h, e) => void cacheMap.set(h, e), has: (h) => cacheMap.has(h), size: () => cacheMap.size, flush: async () => undefined };
+      const router = createGenerationRouter({
+        logger: createLogger([{ write: () => undefined }], 'fake-roundtrip', 'error'),
+        settings,
+        extensionPath: repoRoot(),
+        version: '0.0.0-test',
+        cache,
+        consent: { granted: () => true, setGranted: async () => undefined },
+        disposables,
+      });
+      const availability = await router.availableChannels();
+      const claude = availability.find((a) => a.channel === 'claude');
+      assert.ok(claude?.available, `fake claude must look available: ${claude?.reason} ${claude?.detail}`);
+
+      const problem = subset.problems[1];
+      const text = functionTextForExplain(problem);
+      const [exp] = await router.explainFunctions(
+        { fileName: `${problem.entry_point}.py`, languageId: 'python', fileSummary: preambleForContext(problem) || undefined, functions: [{ functionId: `${problem.entry_point}#0`, name: problem.entry_point, text, contentHash: contentHashOf(text) }] },
+        { channel: 'claude', timeoutMs: 20_000 },
+      );
+      assert.ok(exp, 'the router returned an explanation');
+      assert.strictEqual(exp.name, problem.entry_point);
+      assert.strictEqual(exp.modelChannel, 'claude');
+      assert.deepStrictEqual(checkStyle(exp), { ok: true, problems: [] });
+
+      const split = splitPrompt(problem.prompt, problem.entry_point);
+      const r = await resynthesize('claude', settings, { entryPoint: problem.entry_point, signature: split.signature, context: split.preamble.trim(), explanation: { summary: exp.summary, steps: exp.steps } }, { timeoutMs: 20_000, homeDir: home });
+      assert.ok(r.code.includes(`def ${problem.entry_point}(`), r.code);
+      assert.ok(!r.reply.includes('Task: resynthesize'), 'the reply is not an echo of the prompt');
+
+      if (await findPython()) {
+        const run = await runPythonProgram(buildTestProgram(problem, r.code), { timeoutMs: 10_000 });
+        assert.strictEqual(run.passed, true, run.stderr);
+        assert.ok(run.stdout.includes('EXPLAINIT_EVAL_PASS'));
+      }
+      assert.ok(fs.existsSync(path.join(home, 'tmp')), 'the CLI ran inside <home>/tmp');
+    } finally {
+      for (const d of disposables) d.dispose();
+      if (previousHome === undefined) delete process.env.EXPLAINIT_HOME;
+      else process.env.EXPLAINIT_HOME = previousHome;
       fs.rmSync(home, { recursive: true, force: true });
     }
   });

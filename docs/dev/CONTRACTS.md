@@ -270,3 +270,16 @@ dialogs that block (auto-answer using `EXPLAINIT_TEST_ANSWERS` JSON env if prese
 (`gate`, `twin`, `router`, `structure`, `adapters`, `ux`, `kits()`, `review`, `memory`, `instructions`, `copilot`,
 `state`, `settings`). `src/core/landing.ts` (`recordLanding` / `landedRecently`) is how the gate tells the Copilot
 watcher and twin staleness logic that a write was gate-approved.
+
+## Codex specifics (verified against codex-rs hooks/src/engine/output_parser.rs and the real 0.152 / bundled 0.151 binaries)
+
+- Codex has no `ask` answer for PreToolUse and treats a bare `allow` as unsupported (it fails open to its own approval flow).
+  For `--agent codex` the hook therefore prints nothing for `ask`/`none`/bare `allow`, prints `allow` only together with
+  `updatedInput`, and prints `deny` with the reason. Partial acceptance relies on `deny(reason)` as before.
+- Codex honours `CODEX_HOME`; the adapter, the hook mirror and the protected-path list use `$CODEX_HOME/hooks.json|config.toml`
+  when it is set, else `~/.codex/...`.
+- Codex loads a project-layer `.codex/hooks.json` only when the project is trusted in the person's own `config.toml`
+  (a `-c projects...trust_level` flag does not do it). The real-agent conformance test injects the hook as
+  `-c hooks.PreToolUse=[...]` session flags together with `--dangerously-bypass-hook-trust`.
+- Hook trust: Codex records `[hooks.state."<key>"] trusted_hash = "sha256:..."` in `config.toml`; `src/adapters/pure/codexTrust.ts`
+  reproduces the hash byte-for-byte (pinned fixture), so the Doctor can say trusted / modified / untrusted.

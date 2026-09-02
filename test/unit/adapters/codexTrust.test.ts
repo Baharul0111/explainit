@@ -53,6 +53,20 @@ trust_level = "trusted"
     assert.strictEqual(codexHookHash('PreToolUse', 'x', { command: 'c' }), codexHookHash('PreToolUse', 'x', { command: 'c', timeout: 600 }));
   });
 
+  test('codexHookHash reproduces the hash the real codex binary reports (pinned fixture)', () => {
+    // Recorded on 2026-09-02 from `codex app-server` (codex-cli 0.152.0) hooks/list `currentHash` for exactly these
+    // entries. If Codex ever changes its trust identity, this test is the early warning (pinned-version conformance).
+    const cmd = '"/Users/x/.explainit/hooks/explainit-hook.sh" --agent codex --watchdog 120';
+    assert.strictEqual(
+      codexHookHash('PreToolUse', 'apply_patch|Edit|Write|Bash', { command: cmd, timeout: 7200 }),
+      'sha256:95fd35a948999f07b3ddc7afb40470d2a23454d5af870d7f6dd8c7f9767944de',
+    );
+    assert.strictEqual(
+      codexHookHash('PostToolUse', 'apply_patch|Edit|Write', { command: cmd + ' --event PostToolUse', timeout: 10 }),
+      'sha256:4045bb06d0902bdb920bbc932affb031b1584558e17897686c55ee8ee0405666',
+    );
+  });
+
   test('lookupTrust reports trusted / modified / untrusted / disabled', () => {
     const good = codexHookHash('PreToolUse', 'm', { command: 'c', timeout: 7200 });
     assert.strictEqual(lookupTrust({ [KEY]: { trusted_hash: good } }, 'PreToolUse', 1, 0, good).status, 'trusted');
@@ -65,5 +79,18 @@ trust_level = "trusted"
     assert.strictEqual(lookupTrust({ '/Users/me/.codex/config.toml:pre_tool_use:1:0': { trusted_hash: good } }, 'PreToolUse', 1, 0, good).status, 'untrusted');
     // windows-style key source is accepted
     assert.strictEqual(lookupTrust({ ['C:\\Users\\me\\.codex\\hooks.json:pre_tool_use:1:0']: { trusted_hash: good } }, 'PreToolUse', 1, 0, good).status, 'trusted');
+  });
+
+  test('lookupTrust with known hooks.json paths matches the real path Codex writes, not other files', () => {
+    const good = codexHookHash('PreToolUse', 'm', { command: 'c', timeout: 7200 });
+    // Codex resolves symlinks in the key (macOS /var -> /private/var) and CODEX_HOME may be anywhere.
+    const states = { ['/private/var/tmp/codex-home/hooks.json:pre_tool_use:0:0']: { trusted_hash: good } };
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['/var/tmp/codex-home/hooks.json', '/private/var/tmp/codex-home/hooks.json']).status, 'trusted');
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['/Users/me/.codex/hooks.json']).status, 'untrusted', 'a record for a different hooks.json never counts');
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['/PRIVATE/var/tmp/codex-home/hooks.json']).status, 'trusted', 'case-insensitive on this platform');
+    }
+    const win = { ['C:\\Users\\me\\.codex\\hooks.json:pre_tool_use:0:0']: { trusted_hash: good } };
+    assert.strictEqual(lookupTrust(win, 'PreToolUse', 0, 0, good, ['C:\\Users\\me\\.codex\\hooks.json']).status, 'trusted');
   });
 });

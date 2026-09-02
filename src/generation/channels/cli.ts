@@ -214,11 +214,13 @@ function resolveNode(opts: ResolveOptions): { path: string; env?: Record<string,
 /** Split "node <path>.js" style values on the first space (only when the value ends with .js). */
 export function parseSettingValue(value: string): { runtime?: string; target: string } {
   const v = value.trim();
-  if (/\.js$/i.test(v) && v.includes(' ')) {
+  const unquote = (s: string): string => s.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+  // `node /abs/claude.js` or `node "/path with spaces/claude.js"`: split on the first space only.
+  if (/\.js["']?$/i.test(v) && v.includes(' ') && !/^["']/.test(v)) {
     const i = v.indexOf(' ');
-    return { runtime: v.slice(0, i).trim(), target: v.slice(i + 1).trim().replace(/^"(.*)"$/, '$1') };
+    return { runtime: v.slice(0, i).trim(), target: unquote(v.slice(i + 1)) };
   }
-  return { target: v.replace(/^"(.*)"$/, '$1') };
+  return { target: unquote(v) };
 }
 
 function fromSetting(kind: CliKind, value: string, opts: ResolveOptions): { spec?: CliSpec; problem?: string } {
@@ -349,9 +351,11 @@ function attemptOnce(spec: CliSpec, args: string[], opts: RunCliOptions, attempt
       // cmd.exe joins args with spaces: an empty value (`--tools ""`) must be quoted or it vanishes.
       fullArgs = fullArgs.map((a) => (a === '' ? '""' : /\s/.test(a) ? `"${a}"` : a));
     }
+    // cmd.exe splits the command line on spaces: a shim under "C:\Users\Jane Doe\..." must be quoted.
+    const command = spec.shell && /\s/.test(spec.path) && !/^".*"$/.test(spec.path) ? `"${spec.path}"` : spec.path;
     let child: ChildProcess;
     try {
-      child = spawn(spec.path, fullArgs, {
+      child = spawn(command, fullArgs, {
         cwd: opts.cwd,
         env: { ...process.env, ...(spec.env ?? {}), ...(opts.env ?? {}) },
         stdio: ['pipe', 'pipe', 'pipe'],

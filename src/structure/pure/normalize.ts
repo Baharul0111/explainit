@@ -147,6 +147,36 @@ export function emptyFunctionMap(text: string, languageId: string, fileUri: stri
   return { fileUri, languageId, functions: [], source, textHash: textHashOf(text) };
 }
 
+/**
+ * Basename of a uri string or a path (POSIX or Windows, on any host), sanitised for use inside a
+ * virtual document path. The extension is kept so VS Code can infer the language from it. Never empty.
+ */
+export function hintBasename(uriHint: string, fallback = 'proposed.txt'): string {
+  let candidate = '';
+  const hint = typeof uriHint === 'string' ? uriHint.trim() : '';
+  // A uri has a scheme (`file://...`, `untitled:Untitled-1`); a single letter before `:` is a Windows drive.
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/.exec(hint);
+  if (scheme && (scheme[1].length > 1 || scheme[2].startsWith('//'))) {
+    try {
+      candidate = new URL(hint).pathname;
+    } catch {
+      candidate = scheme[2].replace(/^\/\/[^/]*/, '').replace(/[?#].*$/, '');
+    }
+    candidate = candidate.split('/').pop() ?? '';
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch {
+      /* keep the encoded form */
+    }
+  } else {
+    // A plain path: either separator counts, so `C:\repo\a.ts` gives `a.ts` on macOS and Linux too.
+    candidate = hint.split(/[\\/]/).pop() ?? '';
+  }
+  candidate = candidate.replace(/[^\w.+-]/g, '_');
+  if (!candidate || /^\.+$/.test(candidate)) return fallback;
+  return candidate;
+}
+
 /** Whether the text is worth asking an outliner about: at least two non-blank lines and some length. */
 export function isNonTrivialText(text: string): boolean {
   if (text.trim().length < 20) return false;

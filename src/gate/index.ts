@@ -20,7 +20,17 @@ export function createGateServer(deps: GateDeps & { safetyFor: (path: string) =>
   });
 
   const heartbeatListeners = new Set<Listener<{ ts: string; pending: number }>>();
+  const sameFolders = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
   const beat = (): void => {
+    // Workspace folders can change while the window lives; the hook script picks its session by folder.
+    const info = server.info;
+    if (info) {
+      try {
+        if (!sameFolders(info.folders, deps.workspaceFolders())) server.refreshFolders();
+      } catch (err) {
+        deps.logger.warn('could not refresh the session folders', err);
+      }
+    }
     const e = { ts: new Date().toISOString(), pending: controller.pending };
     for (const l of heartbeatListeners) {
       try {

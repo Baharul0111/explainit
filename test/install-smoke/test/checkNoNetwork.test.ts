@@ -13,6 +13,7 @@ const scanner = require(path.join(REPO_ROOT, 'scripts', 'check-no-network.js')) 
   isLoopbackUrl(url: string): boolean;
   isKnownBenign(finding: { file: string; kind: string; text: string }, allow: { knownBenign?: { file: string; kind: string; contains: string; reason: string }[] }): boolean;
   isAllowedUrl(url: string, allow: { urlPrefixes: string[]; files: string[] }): boolean;
+  snippet(line: string, index: number, length: number): string;
   parseCliArgs(argv: string[]): { roots: string[]; allowlist: string; json: boolean; help: boolean };
   DEFAULT_ROOTS: string[];
 };
@@ -32,7 +33,11 @@ suite('scripts/check-no-network: URLs', () => {
   test('a non-loopback URL in code is a finding; in a comment line it is not', () => {
     const text = ["const a = fetch('https://example.com/api');", '// see https://example.com/docs', ' * https://docs.example.com', '# https://x.y', "const ok = 'http://127.0.0.1:9/v1/health';"].join('\n');
     const f = scanner.scanText(text, 'src/a.ts', noAllow);
-    assert.deepEqual(f, [{ file: 'src/a.ts', line: 1, kind: 'url', text: 'https://example.com/api' }]);
+    // Line 1 is reported twice: once for the URL and once for the bare fetch() call itself.
+    assert.deepEqual(f, [
+      { file: 'src/a.ts', line: 1, kind: 'url', text: 'https://example.com/api' },
+      { file: 'src/a.ts', line: 1, kind: 'api', text: "const a = fetch('https://example.com/api');" },
+    ]);
   });
 
   test('allow-listed prefixes pass, trailing punctuation is trimmed, several URLs on one line are all checked', () => {
@@ -82,6 +87,51 @@ suite('scripts/check-no-network: modules and browser APIs', () => {
       f.map((x) => x.kind),
       ['url'],
     );
+  });
+
+  test('a bare fetch() call is a finding; method calls and member declarations are not; bundles are exempt from the bare-fetch rule', () => {
+    const text = [
+      "const r = await fetch('http://127.0.0.1:1/v1/health');", // 1: bare fetch, even to loopback (the URL rule is separate)
+      'const s = await symbols.fetch(uri, languageId);', // 2: a method
+      '  fetch(uri: vscode.Uri, languageId: string): Promise<SymbolFetchResult>;', // 3: interface member
+      '  async fetch(uri) {', // 4: class method definition
+      'return globalThis.fetch(url);', // 5
+      'const f = (u) => fetch(u);', // 6
+      'const x = { prefetch(u) {} }; prefetch(u); refetch(u);', // 7: other identifiers
+      "doFetch('https://api.example.com');", // 8: url only
+    ].join('\n');
+    const f = scanner.scanText(text, 'src/x.ts', noAllow);
+    assert.deepEqual(
+      f.map((x) => [x.line, x.kind]),
+      [
+        [1, 'api'],
+        [5, 'api'],
+        [6, 'api'],
+        [8, 'url'],
+      ],
+    );
+    assert.match(f[0].text, /^const r = await fetch\(/);
+    // A minified bundle keeps method names, so `fetch(` there is indistinguishable from a definition.
+    const bundle = 'var a={fetch(e,t){return 1}};async function b(){return await fetch(u)}';
+    assert.deepEqual(scanner.scanText(bundle, 'dist/extension.js', noAllow), []);
+    // The same text in a source root is checked strictly: the minified method definition is not at the
+    // start of a line, so it and the real call are both reported (sources are never minified).
+    assert.equal(scanner.scanText(bundle, 'src/extension.js', noAllow).length, 2);
+    // Other APIs stay findings in bundles.
+    assert.equal(scanner.scanText('var w=new WebSocket(u);', 'dist/extension.js', noAllow).length, 1);
+  });
+
+  test('API findings carry a snippet around the match, so a one-line minified bundle is still readable', () => {
+    const filler = 'a'.repeat(500);
+    const line = `${filler}var x=new XMLHttpRequest();${filler}var y=new EventSource(u);${filler}`;
+    const f = scanner.scanText(line, 'media/x.js', noAllow);
+    assert.equal(f.length, 2, 'one finding per match, not per line');
+    assert.ok(f[0].text.includes('new XMLHttpRequest()'), f[0].text);
+    assert.ok(f[1].text.includes('new EventSource('), f[1].text);
+    assert.ok(f[0].text.length < 200, 'snippets are short');
+    assert.ok(f[0].text.startsWith('...') && f[0].text.endsWith('...'));
+    assert.equal(scanner.snippet('short line', 0, 5), 'short line');
+    assert.equal(scanner.snippet('x'.repeat(100) + 'MATCH' + 'y'.repeat(100), 100, 5), '...' + 'x'.repeat(40) + 'MATCH' + 'y'.repeat(80) + '...');
   });
 
   test('browser network APIs in webview code are findings', () => {

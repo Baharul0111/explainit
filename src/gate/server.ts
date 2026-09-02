@@ -48,7 +48,7 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-function readBody(req: http.IncomingMessage, limit: number): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
+function readBody(req: http.IncomingMessage, limit: number): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string; drop?: boolean }> {
   return new Promise((resolve) => {
     const declared = Number(req.headers['content-length'] ?? 0);
     if (declared > limit) {
@@ -64,8 +64,9 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<{ ok: true;
       size += c.length;
       if (size > limit) {
         done = true;
-        resolve({ ok: false, status: 413, error: `The request body is larger than ${limit / 1024 / 1024} MB.` });
-        req.destroy();
+        // Stop buffering; the caller answers 413 first and then drops the connection.
+        req.pause();
+        resolve({ ok: false, status: 413, error: `The request body is larger than ${limit / 1024 / 1024} MB.`, drop: true });
         return;
       }
       chunks.push(c);
@@ -212,6 +213,7 @@ export class GateHttpServer {
   private async onHook(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await readBody(req, BODY_LIMIT);
     if (!body.ok) {
+      if (body.drop) res.once('finish', () => req.destroy());
       send(res, body.status, { error: body.error });
       return;
     }

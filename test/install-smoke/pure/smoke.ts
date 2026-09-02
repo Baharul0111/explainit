@@ -139,7 +139,7 @@ export function hasExtension(list: { id: string }[], id: string): boolean {
  */
 export function buildUserSettings(fakeClaudeCli: string): Record<string, unknown> {
   return {
-    'explainit.assistant.claudeCliPath': `node ${fakeClaudeCli}`,
+    'explainit.assistant.claudeCliPath': `node ${quoteScriptPath(fakeClaudeCli)}`,
     'explainit.assistant.channel': 'claude',
     'explainit.twin.autoOpen': true,
     'explainit.checkpoint.enabled': true,
@@ -157,6 +157,16 @@ export function buildUserSettings(fakeClaudeCli: string): Record<string, unknown
     'files.hotExit': 'off',
     'git.autoRepositoryDetection': false,
   };
+}
+
+/**
+ * The resolver splits `node <script>` on the first space, so a script path that itself contains
+ * whitespace (a repo under "My Projects", a Windows user name with a space) must be double-quoted:
+ * `node "C:\\My Projects\\explainit\\test\\fixtures\\fake-cli\\claude.js"`. Paths without whitespace are left bare.
+ */
+export function quoteScriptPath(scriptPath: string): string {
+  if (!/\s/.test(scriptPath)) return scriptPath;
+  return `"${scriptPath.replace(/"/g, '')}"`;
 }
 
 /**
@@ -223,6 +233,102 @@ export function shouldCopyFixtureFile(relativePath: string): boolean {
   if (base.endsWith('_explain.txt')) return false;
   if (relativePath.split(/[\\/]/).includes('.git')) return false;
   return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Twin content checks (mirror docs/dev/CONTRACTS.md "Twin file contract")
+// ---------------------------------------------------------------------------------------------
+
+export const TWIN_EXCLUDE_PATTERN = '*_explain.txt';
+export const TWIN_WHAT_PREFIX = 'What it does: ';
+export const TWIN_HOW_LINE = 'How it works:';
+
+export type TwinSectionState = 'missing' | 'pending' | 'unavailable' | 'incomplete' | 'complete';
+
+export interface TwinSectionStatus {
+  state: TwinSectionState;
+  /** Plain English: the summary line when complete, otherwise what is wrong and what to look at. */
+  detail: string;
+  summary?: string;
+  steps: number;
+}
+
+/**
+ * Is section `<index>. <name>` of a twin fully explained by an assistant? Complete means: a
+ * "What it does:" sentence that is not the "(explaining...)" or "(not explained yet ...)" placeholder,
+ * plus a "How it works:" list of 2..5 "- " lines. The probe (probe/extension.js) carries a plain-JS
+ * copy of this function because it has no build step - keep the two in step.
+ */
+export function twinSectionStatus(text: string | undefined, index: number, name: string): TwinSectionStatus {
+  if (text === undefined || text === '') return { state: 'missing', detail: 'the twin file does not exist yet', steps: 0 };
+  const lines = text.split(/\r?\n/);
+  const header = `${index}. ${name}`;
+  const start = lines.findIndex((l) => l.trim() === header);
+  if (start < 0) return { state: 'missing', detail: `no "${header}" section (first lines: ${lines.slice(0, 3).join(' | ')})`, steps: 0 };
+  const section: string[] = [];
+  for (let i = start + 1; i < lines.length && lines[i].trim() !== '' && !/^\d+\. /.test(lines[i]); i++) section.push(lines[i]);
+  const what = section.find((l) => l.startsWith(TWIN_WHAT_PREFIX));
+  if (!what) return { state: 'incomplete', detail: `the "${header}" section has no "What it does:" line`, steps: 0 };
+  const summary = what.slice(TWIN_WHAT_PREFIX.length).trim();
+  if (summary.startsWith('(explaining')) return { state: 'pending', detail: 'the section still says "(explaining...)": the assistant has not answered yet', steps: 0 };
+  if (summary.startsWith('(not explained yet')) return { state: 'unavailable', detail: 'the section says "(not explained yet ...)": no assistant was used', steps: 0 };
+  const howAt = section.indexOf(TWIN_HOW_LINE);
+  const steps = howAt < 0 ? 0 : section.slice(howAt + 1).filter((l) => l.startsWith('- ')).length;
+  if (howAt < 0 || steps < 2) return { state: 'incomplete', detail: `the section has ${steps} "How it works" step(s); at least 2 expected`, summary, steps };
+  if (steps > 5) return { state: 'incomplete', detail: `the section has ${steps} "How it works" steps; at most 5 expected`, summary, steps };
+  if (!/[.!?]$/.test(summary)) return { state: 'incomplete', detail: `the summary is not a sentence: "${summary}"`, summary, steps };
+  return { state: 'complete', detail: `${what} (${steps} steps)`, summary, steps };
+}
+
+/** The twin header names its source file: "ExplainIT — plain-English twin of app.py". */
+export function twinHeaderMatches(text: string | undefined, sourceName: string): boolean {
+  if (!text) return false;
+  const first = text.split(/\r?\n/)[0] ?? '';
+  return first.startsWith('ExplainIT ') && first.endsWith(` twin of ${sourceName}`);
+}
+
+/** True when a .git/info/exclude (or .gitignore) text has the `*_explain.txt` line. */
+export function hasTwinExcludeEntry(text: string | undefined): boolean {
+  if (!text) return false;
+  return text.split(/\r?\n/).some((l) => l.trim() === TWIN_EXCLUDE_PATTERN);
+}
+
+// ---------------------------------------------------------------------------------------------
+// One jittered retry (CONTRACTS: every external call has a timeout and at most one jittered retry)
+// ---------------------------------------------------------------------------------------------
+
+export interface RetryOptions<T> {
+  /** True when the attempt's result is good enough to stop. A thrown attempt is never ok. */
+  isOk: (value: T) => boolean;
+  /** Base wait before the retry; the actual wait is jittered to 50%..150% of it. */
+  baseWaitMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+  log?: (message: string) => void;
+}
+
+export function jitterMs(base: number, random: () => number = Math.random): number {
+  return Math.round(base * (0.5 + random()));
+}
+
+/**
+ * Run `fn` once; if it throws or its result is not ok, wait a jittered moment and run it exactly once
+ * more. The second attempt's outcome (result or error) is returned as is: never more than two tries.
+ */
+export async function withRetry<T>(what: string, fn: () => Promise<T>, o: RetryOptions<T>): Promise<T> {
+  const sleep = o.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  let reason: string;
+  try {
+    const first = await fn();
+    if (o.isOk(first)) return first;
+    reason = 'did not succeed';
+  } catch (e) {
+    reason = (e as Error).message || String(e);
+  }
+  const wait = jitterMs(o.baseWaitMs ?? 2000, o.random);
+  o.log?.(`${what} failed (${reason}); retrying once in ${formatMs(wait)}`);
+  await sleep(wait);
+  return fn();
 }
 
 // ---------------------------------------------------------------------------------------------

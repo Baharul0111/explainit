@@ -39,6 +39,10 @@ import {
   quoteForCmd,
   seedState,
   shouldCopyFixtureFile,
+  hasTwinExcludeEntry,
+  twinHeaderMatches,
+  twinSectionStatus,
+  withRetry,
 } from './pure/smoke';
 
 interface RunResult {
@@ -116,19 +120,6 @@ function killTree(pid: number | undefined): void {
   }
 }
 
-const jitterMs = (base: number): number => Math.round(base * (0.5 + Math.random()));
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-/** One jittered retry for the two steps that talk to the outside (download) or the CLI (install). */
-async function withRetry<T>(what: string, fn: () => Promise<T>, isOk: (v: T) => boolean): Promise<T> {
-  const first = await fn();
-  if (isOk(first)) return first;
-  const wait = jitterMs(2000);
-  log(`${what} failed; retrying once in ${formatMs(wait)}`);
-  await sleep(wait);
-  return fn();
-}
-
 function copyWorkspace(src: string, dst: string): void {
   fs.cpSync(src, dst, {
     recursive: true,
@@ -184,7 +175,16 @@ async function main(): Promise<number> {
     // 1. VSIX
     let vsix = args.vsix ? path.resolve(args.vsix) : undefined;
     if (!vsix) {
-      const candidates = fs.readdirSync(repoRoot).map((name) => ({ name, mtimeMs: fs.statSync(path.join(repoRoot, name)).mtimeMs }));
+      // A broken symlink or an unreadable entry in the repo root must not stop the search.
+      const candidates: { name: string; mtimeMs: number }[] = [];
+      for (const name of fs.readdirSync(repoRoot)) {
+        try {
+          const st = fs.statSync(path.join(repoRoot, name));
+          if (st.isFile()) candidates.push({ name, mtimeMs: st.mtimeMs });
+        } catch {
+          /* skip */
+        }
+      }
       const newest = pickNewestVsix(candidates);
       if (!newest) {
         report.check('VSIX package present', false, noVsixMessage(repoRoot));
@@ -211,11 +211,8 @@ async function main(): Promise<number> {
     const cachePath = path.join(repoRoot, '.vscode-test');
     let exe: string;
     try {
-      exe = await withRetry(
-        'VS Code download',
-        () => downloadAndUnzipVSCode({ version: args.version, cachePath, timeout: 60_000 }),
-        () => true,
-      );
+      // The download is the one step that talks to the outside: idle timeout 60 s, one jittered retry.
+      exe = await withRetry('VS Code download', () => downloadAndUnzipVSCode({ version: args.version, cachePath, timeout: 60_000 }), { isOk: () => true, log });
     } catch (e) {
       report.check('VS Code downloaded', false, `${(e as Error).message}. Check your network, or set VSCODE_TEST_VERSION to a version already in .vscode-test.`);
       return finish(report);
@@ -230,7 +227,7 @@ async function main(): Promise<number> {
     const install = await withRetry(
       'VSIX install',
       () => run(cli.command, [...cli.argsPrefix, ...installArgs(vsix!, userDataDir, extensionsDir)], { env: cliEnv, timeoutMs: CLI_TIMEOUT_MS, shell: cli.shell }),
-      (r) => r.code === 0,
+      { isOk: (r) => r.code === 0, log },
     );
     const installOk = report.check(
       'VSIX installs into a fresh profile (exit 0)',
@@ -278,6 +275,16 @@ async function main(): Promise<number> {
     for (const s of probe.result.steps) report.check(s.name, s.ok, s.detail, s.ms);
     if (probe.result.error && !probe.result.steps.some((s) => !s.ok)) report.check('Probe completed without errors', false, probe.result.error);
     report.check('Probe verdict', probe.result.ok, probe.result.ok ? `VS Code ${probe.result.vscodeVersion ?? '?'}, ExplainIT ${probe.result.extensionVersion ?? '?'}` : probe.result.error ?? 'one or more probe steps failed');
+
+    // 5. Independent re-check from outside VS Code, after it quit: what is on disk is what the person keeps.
+    const twinPath = path.join(workspaceDir, 'src', 'app_explain.txt');
+    const twinText = readIfExists(twinPath);
+    const status = twinSectionStatus(twinText, 1, 'load_config');
+    report.check('On disk after quit: app_explain.txt names app.py in its header', twinHeaderMatches(twinText, 'app.py'), twinText ? twinText.split(/\r?\n/)[0] : `${twinPath} does not exist`);
+    report.check('On disk after quit: "1. load_config" is fully explained (summary + 2..5 steps)', status.state === 'complete', status.detail);
+    const excludePath = path.join(workspaceDir, '.git', 'info', 'exclude');
+    const excludeText = readIfExists(excludePath);
+    report.check('On disk after quit: .git/info/exclude lists *_explain.txt', hasTwinExcludeEntry(excludeText), excludeText === undefined ? `${excludePath} does not exist` : excludePath);
     return finish(report);
   } finally {
     if (args.keep || (!report.ok && process.env.EXPLAINIT_SMOKE_KEEP_ON_FAIL === '1')) {
@@ -291,6 +298,14 @@ async function main(): Promise<number> {
 function finish(report: Report): number {
   console.log('\n' + report.render() + '\n');
   return report.ok ? 0 : 1;
+}
+
+function readIfExists(file: string): string | undefined {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 function tail(text: string, lines = 8): string {

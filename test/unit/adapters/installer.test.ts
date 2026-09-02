@@ -246,6 +246,37 @@ suite('adapters/installer (claude + codex round trip)', function () {
     assert.ok(checks.filter((c) => c.name !== 'Codex hook trust').every((c) => c.ok), JSON.stringify(checks));
   });
 
+  test('claude and codex can be installed at the same time (shared script and wrappers)', async () => {
+    const [a, b] = await Promise.all([sb.claude.install(), sb.codex.install()]);
+    assert.strictEqual(a.ok, true, a.detail);
+    assert.strictEqual(b.ok, true, b.detail);
+    assert.ok(!fs.readdirSync(sb.env.hooksDir).some((f) => f.endsWith('.tmp')), 'no temp files left behind');
+    assert.ok(sb.claude.verify().every((c) => c.ok), JSON.stringify(sb.claude.verify()));
+    assert.ok(sb.codex.verify().filter((c) => c.name !== 'Codex hook trust').every((c) => c.ok));
+    const rec = sb.env.state.read().adapters!;
+    assert.ok(rec.claude && rec.codex, 'both records survive the concurrent state updates');
+  });
+
+  test('a corrupt state.json is treated as "not connected" and a fresh install repairs it', async () => {
+    fs.mkdirSync(path.dirname(sb.env.state.file), { recursive: true });
+    fs.writeFileSync(sb.env.state.file, '{ corrupt');
+    assert.strictEqual(sb.claude.isInstalled(), false);
+    assert.ok(sb.claude.verify().every((c) => c.ok));
+    const r = await sb.claude.install();
+    assert.strictEqual(r.ok, true, r.detail);
+    assert.ok(sb.env.state.read().adapters?.claude?.scriptHash);
+  });
+
+  test('a hooks.json with a non-object top level is reported in plain English and left untouched', async () => {
+    fs.mkdirSync(path.dirname(sb.codexHooks), { recursive: true });
+    fs.writeFileSync(sb.codexHooks, '[1, 2]');
+    const r = await sb.codex.install();
+    assert.strictEqual(r.ok, false);
+    assert.match(r.detail ?? '', /not valid JSON/);
+    assert.strictEqual(fs.readFileSync(sb.codexHooks, 'utf8'), '[1, 2]');
+    assert.strictEqual(sb.codex.trustStatus().status, 'unknown');
+  });
+
   test('verify is fast', async () => {
     await sb.claude.install();
     await sb.codex.install();

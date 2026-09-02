@@ -53,6 +53,19 @@ suite('generation/channels/cli', () => {
       assert.deepEqual(parseSettingValue('node /a b/c.js'), { runtime: 'node', target: '/a b/c.js' });
       assert.deepEqual(parseSettingValue('/opt/my tools/claude'), { target: '/opt/my tools/claude' });
       assert.deepEqual(parseSettingValue('"/x/y.js"'), { target: '/x/y.js' });
+      assert.deepEqual(parseSettingValue('node "/a b/c.js"'), { runtime: 'node', target: '/a b/c.js' });
+      assert.deepEqual(parseSettingValue("node '/a b/c.js'"), { runtime: 'node', target: '/a b/c.js' });
+      assert.deepEqual(parseSettingValue('"C:\\Program Files\\Claude\\claude.exe"'), { target: 'C:\\Program Files\\Claude\\claude.exe' });
+      assert.deepEqual(parseSettingValue('"/x/my script.js"'), { target: '/x/my script.js' }, 'a quoted path without a runtime is not split');
+    });
+
+    test('a quoted "node <path with spaces>.js" setting resolves to the script', () => {
+      const script = path.join(dir, 'my tools', 'fake claude.js');
+      fs.mkdirSync(path.dirname(script), { recursive: true });
+      fs.writeFileSync(script, 'process.stdout.write("1.0.0")');
+      const spec = resolveCli('claude', `node "${script}"`, { noVscode: true, extensionRoots: [] });
+      assert.equal(spec.source, 'setting');
+      assert.deepEqual(spec.argsPrefix, [script]);
     });
 
     test('an absolute setting path is used when it exists, otherwise the search continues with a note', () => {
@@ -228,6 +241,18 @@ suite('generation/channels/cli', () => {
       setTimeout(() => src.cancel(), 150);
       await assert.rejects(p, (e: unknown) => e instanceof ChannelError && e.reason === 'cancelled');
       assert.equal(fs.readFileSync(pidFile, 'utf8').trim().split('\n').length, 1);
+    });
+
+    test('shell mode quotes an executable path that contains spaces', async function () {
+      if (isWin) this.skip(); // the POSIX shell shows the same quoting need as cmd.exe; the .cmd path is covered by withWindowsShim
+      const script = path.join(dir, 'with space', 'run.sh');
+      fs.mkdirSync(path.dirname(script), { recursive: true });
+      fs.writeFileSync(script, '#!/bin/sh\necho ok\n');
+      fs.chmodSync(script, 0o755);
+      const spec: CliSpec = { kind: 'claude', path: script, argsPrefix: [], source: 'path', detail: 'test', shell: true };
+      const r = await runCli(spec, [], { timeoutMs: 10_000, retry: false });
+      assert.equal(r.code, 0);
+      assert.equal(r.stdout.trim(), 'ok');
     });
 
     test('probeVersion against the fake CLIs', async () => {

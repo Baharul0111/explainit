@@ -109,6 +109,37 @@ suite('hook script conformance', function () {
     assert.strictEqual(sameHooks.stdout, '', 'hooks unchanged -> not protected (and no session -> nothing)');
     const plainEdit = await hook(['--agent', 'claude'], claudePayload('Edit', { file_path: settings, old_string: '"opus"', new_string: '"sonnet"' }));
     assert.strictEqual(plainEdit.stdout, '');
+    // An edit that never says "hooks" but changes the hook command is still a hooks change (the edit is replayed).
+    const sneaky = await hook(['--agent', 'claude'], claudePayload('Edit', { file_path: settings, old_string: 'x/', new_string: 'y/' }));
+    assert.strictEqual(parse(sneaky).hookSpecificOutput.permissionDecision, 'deny');
+    const sneakyMulti = await hook(['--agent', 'claude'], claudePayload('MultiEdit', { file_path: settings, edits: [{ old_string: '"opus"', new_string: '"haiku"' }, { old_string: '"Write"', new_string: '"Read"' }] }));
+    assert.strictEqual(parse(sneakyMulti).hookSpecificOutput.permissionDecision, 'deny');
+    const multiPlain = await hook(['--agent', 'claude'], claudePayload('MultiEdit', { file_path: settings, edits: [{ old_string: '"opus"', new_string: '"haiku"' }] }));
+    assert.strictEqual(multiPlain.stdout, '', 'a MultiEdit that leaves hooks alone is not protected');
+  });
+
+  test('protected: project .codex files — any edit of hooks.json, and trust-record edits of config.toml', async () => {
+    const codexDir = path.join(proj, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const hooks = path.join(codexDir, 'hooks.json');
+    fs.writeFileSync(hooks, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'x/explainit-hook.sh --agent codex' }] }] } }));
+    const editHooks = await hook(['--agent', 'codex'], codexPayload('Edit', { file_path: hooks, old_string: 'Bash', new_string: 'Never' }));
+    assert.strictEqual(parse(editHooks).hookSpecificOutput.permissionDecision, 'deny');
+    const sameWrite = await hook(['--agent', 'codex'], codexPayload('Write', { file_path: hooks, content: fs.readFileSync(hooks, 'utf8') }));
+    assert.strictEqual(sameWrite.stdout, '', 'rewriting hooks.json with identical hooks is not a change');
+    const config = path.join(codexDir, 'config.toml');
+    fs.writeFileSync(config, 'model = "gpt"\n\n[hooks.state."/h/hooks.json:pre_tool_use:0:0"]\nenabled = true\ntrusted_hash = "sha256:aaaa"\n');
+    const hashOnly = await hook(['--agent', 'codex'], codexPayload('Edit', { file_path: config, old_string: 'sha256:aaaa', new_string: 'sha256:bbbb' }));
+    assert.strictEqual(parse(hashOnly).hookSpecificOutput.permissionDecision, 'deny', 'replacing just the hash value is a trust change');
+    const modelOnly = await hook(['--agent', 'codex'], codexPayload('Edit', { file_path: config, old_string: '"gpt"', new_string: '"gpt-6"' }));
+    assert.strictEqual(modelOnly.stdout, '', 'changing the model line is not protected');
+  });
+
+  test('protected: shell commands naming ~/.explainit in any spelling are denied', async () => {
+    for (const cmd of ['rm -rf ~/.explainit', 'rm -rf "$HOME/.explainit/sessions"', 'ls ~/.EXPLAINIT/hooks']) {
+      const r = await hook(['--agent', 'claude'], claudePayload('Bash', { command: cmd }));
+      assert.strictEqual(parse(r).hookSpecificOutput.permissionDecision, 'deny', cmd);
+    }
   });
 
   test('protected: user-layer ~/.claude/settings.json and ~/.codex files are denied for whole-file writes', async () => {
@@ -117,6 +148,17 @@ suite('hook script conformance', function () {
     assert.strictEqual(parse(r).hookSpecificOutput.permissionDecision, 'deny');
     const c = await hook(['--agent', 'codex'], codexPayload('Write', { file_path: path.join(os.homedir(), '.codex', 'config.toml'), content: 'model = "x"\n' }));
     assert.strictEqual(parse(c).hookSpecificOutput.permissionDecision, 'deny');
+  });
+
+  test('protected: a custom CODEX_HOME is honoured for hooks.json and config.toml', async () => {
+    const codexHome = path.join(root, 'codex-home');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const denied = await hook(['--agent', 'codex'], codexPayload('Write', { file_path: path.join(codexHome, 'hooks.json'), content: '{"hooks":{}}' }), { CODEX_HOME: codexHome });
+    assert.strictEqual(parse(denied).hookSpecificOutput.permissionDecision, 'deny');
+    const deniedToml = await hook(['--agent', 'codex'], codexPayload('Edit', { file_path: path.join(codexHome, 'config.toml'), old_string: 'trusted_hash', new_string: 'x' }), { CODEX_HOME: codexHome });
+    assert.strictEqual(parse(deniedToml).hookSpecificOutput.permissionDecision, 'deny');
+    const plain = await hook(['--agent', 'codex'], codexPayload('Write', { file_path: path.join(codexHome, 'notes.md'), content: 'hi' }), { CODEX_HOME: codexHome });
+    assert.strictEqual(plain.stdout, '', 'other files in CODEX_HOME are not protected (and no session -> nothing)');
   });
 
   test('200 allow -> allow JSON; envelope and bearer token reach the gate', async () => {

@@ -22,6 +22,12 @@ import {
   seedState,
   shouldCopyFixtureFile,
   versionFromVsixName,
+  hasTwinExcludeEntry,
+  jitterMs,
+  quoteScriptPath,
+  twinHeaderMatches,
+  twinSectionStatus,
+  withRetry,
 } from '../pure/smoke';
 
 suite('install-smoke/pure/smoke: VSIX discovery', () => {
@@ -137,6 +143,20 @@ suite('install-smoke/pure/smoke: fresh profile', () => {
     assert.equal(back['explainit.assistant.claudeCliPath'].endsWith('claude.js'), true);
   });
 
+  test('a script path with spaces is double-quoted so the resolver splits "node <script>" correctly', () => {
+    // src/generation/channels/cli.ts parseSettingValue: `node "/path with spaces/claude.js"` is the supported form.
+    assert.equal(quoteScriptPath('/repo/test/fixtures/fake-cli/claude.js'), '/repo/test/fixtures/fake-cli/claude.js');
+    assert.equal(quoteScriptPath('C:\\Users\\Jane Doe\\explainit\\claude.js'), '"C:\\Users\\Jane Doe\\explainit\\claude.js"');
+    assert.equal(quoteScriptPath('/Users/x/My Projects/explainit/claude.js'), '"/Users/x/My Projects/explainit/claude.js"');
+    const s = buildUserSettings('/Users/x/My Projects/explainit/test/fixtures/fake-cli/claude.js');
+    assert.equal(s['explainit.assistant.claudeCliPath'], 'node "/Users/x/My Projects/explainit/test/fixtures/fake-cli/claude.js"');
+    // Mirrors the resolver's split: runtime before the first space, the quoted remainder is the script.
+    const value = s['explainit.assistant.claudeCliPath'] as string;
+    const i = value.indexOf(' ');
+    assert.equal(value.slice(0, i), 'node');
+    assert.equal(value.slice(i + 1).replace(/^"(.*)"$/, '$1'), '/Users/x/My Projects/explainit/test/fixtures/fake-cli/claude.js');
+  });
+
   test('seedState grants consent and marks onboarding done', () => {
     const s = seedState('2026-09-02T00:00:00.000Z');
     assert.equal(s.version, 1);
@@ -242,8 +262,9 @@ suite('install-smoke/pure/smoke: probe result and report', () => {
 suite('install-smoke/pure/smoke: arguments', () => {
   test('defaults', () => {
     const a = parseArgs([], {});
-    assert.deepEqual(a, { keep: false, version: 'stable', timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, help: false, unknown: [] });
+    // `vsix` is checked first: assert.deepEqual narrows `a` to the literal's type afterwards.
     assert.equal(a.vsix, undefined);
+    assert.deepEqual(a, { keep: false, version: 'stable', timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, help: false, unknown: [] });
     assert.equal(DEFAULT_PROBE_TIMEOUT_MS, 180000);
   });
 
@@ -267,5 +288,138 @@ suite('install-smoke/pure/smoke: arguments', () => {
     assert.deepEqual(a.unknown, ['--bogus', '--timeout needs a number of seconds, got "soon"']);
     assert.equal(a.timeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
     assert.deepEqual(parseArgs(['--timeout', '-5'], {}).unknown, ['--timeout needs a number of seconds, got "-5"']);
+  });
+});
+
+suite('install-smoke/pure/smoke: one jittered retry', () => {
+  const noSleep = async (): Promise<void> => {};
+
+  test('a good first result is returned without a retry', async () => {
+    let calls = 0;
+    const v = await withRetry('x', async () => ++calls, { isOk: (n) => n === 1, sleep: noSleep });
+    assert.equal(v, 1);
+    assert.equal(calls, 1);
+  });
+
+  test('a thrown first attempt (the download) is retried exactly once', async () => {
+    let calls = 0;
+    const logs: string[] = [];
+    const v = await withRetry(
+      'VS Code download',
+      async () => {
+        calls++;
+        if (calls === 1) throw new Error('ECONNRESET');
+        return '/vscode/exe';
+      },
+      { isOk: () => true, sleep: noSleep, log: (m) => logs.push(m) },
+    );
+    assert.equal(v, '/vscode/exe');
+    assert.equal(calls, 2);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /VS Code download failed \(ECONNRESET\); retrying once in \d+(\.\d+)? (ms|s)$/);
+  });
+
+  test('a not-ok first result (the install exiting non-zero) is retried exactly once and the second result is returned as is', async () => {
+    let calls = 0;
+    const v = await withRetry('VSIX install', async () => ({ code: ++calls === 1 ? 1 : 0 }), { isOk: (r) => r.code === 0, sleep: noSleep });
+    assert.deepEqual(v, { code: 0 });
+    assert.equal(calls, 2);
+    calls = 0;
+    const still = await withRetry('VSIX install', async () => ({ code: 7, n: ++calls }), { isOk: (r) => r.code === 0, sleep: noSleep });
+    assert.deepEqual(still, { code: 7, n: 2 }, 'never a third attempt');
+  });
+
+  test('a second failure propagates; the wait is jittered between 50% and 150% of the base', async () => {
+    let calls = 0;
+    const waits: number[] = [];
+    await assert.rejects(
+      withRetry(
+        'x',
+        async () => {
+          calls++;
+          throw new Error(`boom ${calls}`);
+        },
+        { isOk: () => true, baseWaitMs: 1000, random: () => 0.25, sleep: async (ms) => void waits.push(ms) },
+      ),
+      /boom 2/,
+    );
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [750]);
+    assert.equal(jitterMs(2000, () => 0), 1000);
+    assert.equal(jitterMs(2000, () => 0.999), 2998);
+    for (let i = 0; i < 50; i++) {
+      const j = jitterMs(2000);
+      assert.ok(j >= 1000 && j <= 3000, String(j));
+    }
+  });
+});
+
+suite('install-smoke/pure/smoke: twin content checks', () => {
+  const header = 'ExplainIT — plain-English twin of app.py\nWritten by ExplainIT. Not committed to git. Right-click a section for "Regenerate this section".\n\n';
+  const complete =
+    header +
+    '1. load_config\nWhat it does: It reads the settings file and turns it into a settings object.\nHow it works:\n- It opens the file at the given path.\n- It reads all of the text.\n- It hands the object back.\n\n2. greet\nWhat it does: (explaining...)\n';
+
+  test('a complete section has a real summary and 2..5 steps', () => {
+    const s = twinSectionStatus(complete, 1, 'load_config');
+    assert.equal(s.state, 'complete');
+    assert.equal(s.steps, 3);
+    assert.equal(s.summary, 'It reads the settings file and turns it into a settings object.');
+    assert.match(s.detail, /What it does: It reads the settings file/);
+    // Windows line endings are fine.
+    assert.equal(twinSectionStatus(complete.replace(/\n/g, '\r\n'), 1, 'load_config').state, 'complete');
+    // A stale mark under the header does not hide a complete explanation.
+    assert.equal(twinSectionStatus(complete.replace('1. load_config\n', '1. load_config\n(Out of date — the code changed. Right-click here and choose "ExplainIT: Regenerate this section".)\n'), 1, 'load_config').state, 'complete');
+  });
+
+  test('placeholders are pending or unavailable, never complete', () => {
+    assert.equal(twinSectionStatus(complete, 2, 'greet').state, 'pending');
+    const unavailable = header + '1. load_config\nWhat it does: (not explained yet — connect an assistant and run "ExplainIT: Regenerate this section")\n';
+    const u = twinSectionStatus(unavailable, 1, 'load_config');
+    assert.equal(u.state, 'unavailable');
+    assert.match(u.detail, /no assistant was used/);
+  });
+
+  test('missing file, missing section and half-written sections are reported with reasons', () => {
+    assert.equal(twinSectionStatus(undefined, 1, 'load_config').state, 'missing');
+    assert.equal(twinSectionStatus('', 1, 'load_config').state, 'missing');
+    const missing = twinSectionStatus(header + '1. greet\nWhat it does: It says hello.\n', 1, 'load_config');
+    assert.equal(missing.state, 'missing');
+    assert.match(missing.detail, /no "1. load_config" section/);
+    const noWhat = twinSectionStatus(header + '1. load_config\nHow it works:\n- a\n- b\n', 1, 'load_config');
+    assert.equal(noWhat.state, 'incomplete');
+    assert.match(noWhat.detail, /no "What it does:" line/);
+    const oneStep = twinSectionStatus(header + '1. load_config\nWhat it does: It loads.\nHow it works:\n- Only one step.\n', 1, 'load_config');
+    assert.equal(oneStep.state, 'incomplete');
+    assert.match(oneStep.detail, /1 "How it works" step\(s\); at least 2/);
+    const noHow = twinSectionStatus(header + '1. load_config\nWhat it does: It loads.\n', 1, 'load_config');
+    assert.equal(noHow.state, 'incomplete');
+    const sixSteps = twinSectionStatus(header + '1. load_config\nWhat it does: It loads.\nHow it works:\n- a\n- b\n- c\n- d\n- e\n- f\n', 1, 'load_config');
+    assert.equal(sixSteps.state, 'incomplete');
+    assert.match(sixSteps.detail, /at most 5/);
+    const notSentence = twinSectionStatus(header + '1. load_config\nWhat it does: loads config\nHow it works:\n- a\n- b\n', 1, 'load_config');
+    assert.equal(notSentence.state, 'incomplete');
+    assert.match(notSentence.detail, /not a sentence/);
+  });
+
+  test('steps belong to their own section only', () => {
+    // Section 1 has no steps of its own; section 2's steps must not be counted for it.
+    const text = header + '1. load_config\nWhat it does: It loads.\n\n2. greet\nWhat it does: It greets.\nHow it works:\n- a\n- b\n';
+    assert.equal(twinSectionStatus(text, 1, 'load_config').state, 'incomplete');
+    assert.equal(twinSectionStatus(text, 2, 'greet').state, 'complete');
+  });
+
+  test('twinHeaderMatches and hasTwinExcludeEntry', () => {
+    assert.equal(twinHeaderMatches(complete, 'app.py'), true);
+    assert.equal(twinHeaderMatches(complete, 'util.ts'), false);
+    assert.equal(twinHeaderMatches(undefined, 'app.py'), false);
+    assert.equal(twinHeaderMatches('random text\n', 'app.py'), false);
+    assert.equal(hasTwinExcludeEntry('# git ls-files --others --exclude-from=.git/info/exclude\n*_explain.txt\n'), true);
+    assert.equal(hasTwinExcludeEntry('*_explain.txt\r\n'), true);
+    assert.equal(hasTwinExcludeEntry('  *_explain.txt  \n'), true);
+    assert.equal(hasTwinExcludeEntry('*_explain.txt.bak\n'), false);
+    assert.equal(hasTwinExcludeEntry('# *_explain.txt\n'), false);
+    assert.equal(hasTwinExcludeEntry(undefined), false);
+    assert.equal(hasTwinExcludeEntry(''), false);
   });
 });

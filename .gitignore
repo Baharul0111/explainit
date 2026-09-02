@@ -12,3 +12,4 @@ coverage/
 *.log
 eval/results/
 out-*/
+.workflows/

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { Decision } from '../../../src/core/types';
 import { landedRecently } from '../../../src/core/landing';
 import { canonicalPath } from '../../../src/core/paths';
-import { GateController, IngressValidationError, REVIEW_SIZE_CAP } from '../../../src/gate/controller';
+import { GateController, IngressValidationError, MAX_SOURCE_BYTES, REVIEW_SIZE_CAP, normalizeVerdict } from '../../../src/gate/controller';
 import { claudeEnvelope, codexEnvelope, makeHarness, type Harness } from './fakes';
 
 const PY = 'def greet(name):\n    return "Hello, " + name\n\n\ndef farewell(name):\n    return "Bye, " + name\n';
@@ -320,5 +320,110 @@ suite('gate/controller', () => {
     await c.handle(claudeEnvelope('Write', { file_path: file, content: PY.replace('Hello', 'Yo') }, h.workspace));
     c.dispose();
     assert.equal(c.pending, 0);
+  });
+
+  test('creating or deleting an empty file has nothing to show -> none (agent prompt), never a silent allow', async () => {
+    const empty = path.join(h.workspace, 'src', 'empty.py');
+    const d = await c.handle(claudeEnvelope('Write', { file_path: empty, content: '' }, h.workspace));
+    assert.deepEqual(d, { permissionDecision: 'none' });
+    assert.equal(h.review.requests.length, 0);
+    fs.writeFileSync(empty, '');
+    const patch = ['*** Begin Patch', '*** Delete File: src/empty.py', '*** End Patch'].join('\n');
+    const del = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace));
+    assert.deepEqual(del, { permissionDecision: 'none' });
+  });
+
+  test('a source file above the read cap is never loaded: ask with a plain-English reason', async () => {
+    const big = path.join(h.workspace, 'src', 'big.py');
+    fs.writeFileSync(big, Buffer.alloc(MAX_SOURCE_BYTES + 1, 0x61));
+    const d = await c.handle(claudeEnvelope('Edit', { file_path: big, old_string: 'a', new_string: 'b' }, h.workspace));
+    assert.equal(d.permissionDecision, 'ask');
+    assert.match(d.reason!, /larger than 8 MB/);
+    assert.equal(h.structure.calls, 0, 'the structure engine never saw the file');
+  });
+
+  test('deleting a file larger than the review cap -> ask (the before side counts)', async () => {
+    const big = path.join(h.workspace, 'src', 'big.py');
+    fs.writeFileSync(big, 'x'.repeat(REVIEW_SIZE_CAP + 1));
+    const patch = ['*** Begin Patch', '*** Delete File: src/big.py', '*** End Patch'].join('\n');
+    const d = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace));
+    assert.equal(d.permissionDecision, 'ask');
+    assert.match(d.reason!, /2 MB/);
+  });
+
+  test('partial acceptance when the file changed on disk during the review -> deny, nothing written', async () => {
+    const after = PY.replace('"Hello, "', '"Hi, "').replace('"Bye, "', '"Ciao, "');
+    h.setReview((req) => {
+      // Someone else writes the file while the review is open.
+      fs.writeFileSync(file, PY + '\n\ndef extra():\n    pass\n');
+      const hv: Record<string, 'accept' | 'reject'> = {};
+      for (const x of req.hunksByPath[req.writes[0].path]) hv[x.id] = x.functionName === 'greet' ? 'accept' : 'reject';
+      return decision('partial', { hunkVerdicts: hv, reason: 'no' });
+    });
+    const d = await c.handle(claudeEnvelope('Write', { file_path: file, content: after }, h.workspace));
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /changed on disk/);
+    assert.match(d.reason!, /Re-read the file/);
+    assert.equal(fs.readFileSync(file, 'utf8'), PY + '\n\ndef extra():\n    pass\n', 'the concurrent write survives');
+    assert.equal(h.safety.checkpoints.saved.length, 0);
+    assert.deepEqual(h.safety.entries.map((e) => e.kind), ['proposed', 'decided']);
+    assert.deepEqual(h.twin.updated, []);
+  });
+
+  test('PostToolUse for a path outside every workspace folder is ignored (no journal, no twin update)', async () => {
+    const outside = path.join(h.root, 'elsewhere.py');
+    fs.writeFileSync(outside, 'x = 1\n');
+    const d = await c.handle(claudeEnvelope('Write', { file_path: outside, content: 'x = 1\n' }, h.workspace, 'PostToolUse'));
+    assert.deepEqual(d, { permissionDecision: 'none' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(h.safety.entries.length, 0);
+    assert.deepEqual(h.twin.updated, []);
+  });
+
+  test('PostToolUse for a twin file never asks the twin engine to regenerate from the twin', async () => {
+    const twin = path.join(h.workspace, 'src', 'app_explain.txt');
+    fs.writeFileSync(twin, 'ExplainIT header\n\n1. greet\nWhat it does: Says hello.\n');
+    const d = await c.handle(claudeEnvelope('Write', { file_path: twin, content: 'x' }, h.workspace, 'PostToolUse'));
+    assert.deepEqual(d, { permissionDecision: 'none' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(h.twin.updated, []);
+    assert.equal(h.safety.entries.length, 0);
+  });
+
+  test('Edit whose old_string spans CRLF text on a CRLF file is reviewed with CRLF kept in the proposal', async () => {
+    const crlf = PY.replace(/\n/g, '\r\n');
+    fs.writeFileSync(file, crlf);
+    h.setReview(() => decision('accept'));
+    const d = await c.handle(claudeEnvelope('Edit', { file_path: file, old_string: '"Hello, " + name\n\n', new_string: '"Hi, " + name\n\n' }, h.workspace));
+    assert.deepEqual(d, { permissionDecision: 'allow' });
+    assert.equal(h.review.requests[0].writes[0].after, crlf.replace('"Hello, "', '"Hi, "'));
+  });
+});
+
+suite('gate/controller: normalizeVerdict', () => {
+  const decision = (verdict: Decision['verdict'], extra: Partial<Decision> = {}): Decision => ({ requestId: 'r', verdict, scope: 'one', decidedAt: '', ...extra });
+  const hunk = (id: string) => ({ id, kind: 'function' as const, changeType: 'modified' as const, beforeText: 'a', afterText: 'b', trivial: false });
+
+  test('special verdicts map directly', () => {
+    assert.equal(normalizeVerdict(decision('paused'), [hunk('a')]), 'none');
+    assert.equal(normalizeVerdict(decision('deny-protected'), [hunk('a')]), 'deny');
+    assert.equal(normalizeVerdict(decision('ask'), [hunk('a')]), 'ask');
+    assert.equal(normalizeVerdict(decision('auto'), []), 'accept');
+  });
+  test('an empty hunk list keeps the decision\'s own verdict (a stray partial is not an accept)', () => {
+    assert.equal(normalizeVerdict(decision('accept'), []), 'accept');
+    assert.equal(normalizeVerdict(decision('reject'), []), 'reject');
+    assert.equal(normalizeVerdict(decision('partial', { hunkVerdicts: {} }), []), 'reject');
+    assert.equal(normalizeVerdict(decision('partial'), []), 'reject');
+  });
+  test('per-hunk verdicts decide: all accept, all reject, mixed', () => {
+    const hs = [hunk('a'), hunk('b')];
+    assert.equal(normalizeVerdict(decision('partial', { hunkVerdicts: { a: 'accept', b: 'accept' } }), hs), 'accept');
+    assert.equal(normalizeVerdict(decision('partial', { hunkVerdicts: { a: 'reject', b: 'reject' } }), hs), 'reject');
+    assert.equal(normalizeVerdict(decision('partial', { hunkVerdicts: { a: 'accept', b: 'reject' } }), hs), 'partial');
+    // A hunk the decision does not mention follows the overall verdict.
+    assert.equal(normalizeVerdict(decision('accept', { hunkVerdicts: { a: 'reject' } }), hs), 'partial');
+    assert.equal(normalizeVerdict(decision('partial', { hunkVerdicts: { a: 'accept' } }), hs), 'partial');
+    assert.equal(normalizeVerdict(decision('reject', { hunkVerdicts: {} }), hs), 'reject');
   });
 });

@@ -61,6 +61,24 @@ suite('eval/python', function () {
     assert.ok(/network access is disabled/.test(r.stderr), r.stderr);
   });
 
+  test('a program that floods stdout and stderr is capped, not buffered without limit', async function () {
+    if (!available) return this.skip();
+    const code = "def greatest_common_divisor(a, b):\n    import sys\n    for _ in range(2000):\n        sys.stdout.write('x' * 1000 + '\\n')\n        sys.stderr.write('y' * 1000 + '\\n')\n    return 1\n";
+    const r = await runPythonProgram(buildTestProgram(PROBLEM, code));
+    assert.strictEqual(r.passed, false);
+    assert.ok(r.stdout.length <= 2 * 64 * 1024, `stdout was ${r.stdout.length} chars`);
+    assert.ok(r.stderr.length <= 2 * 64 * 1024, `stderr was ${r.stderr.length} chars`);
+    assert.ok(!r.stdout.includes('EXPLAINIT_EVAL_PASS'));
+  });
+
+  test('several programs can run at the same time without sharing a temp folder', async function () {
+    if (!available) return this.skip();
+    const good = 'def greatest_common_divisor(a, b):\n    while b:\n        a, b = b, a % b\n    return a\n';
+    const bad = 'def greatest_common_divisor(a, b):\n    return 1\n';
+    const runs = await Promise.all([good, bad, good, bad].map((c) => runPythonProgram(buildTestProgram(PROBLEM, c))));
+    assert.deepStrictEqual(runs.map((r) => r.passed), [true, false, true, false]);
+  });
+
   test('a missing interpreter is reported in plain English', async () => {
     const r = await runPythonProgram('print(1)', { python: { path: 'explainit-no-such-python-xyz', version: '3' } });
     assert.strictEqual(r.passed, false);

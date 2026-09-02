@@ -205,6 +205,15 @@ suite('structure/pure/symbols', () => {
     assert.deepEqual(symbolsToRaw([{ name: 'x', kind: SymbolKindNum.Function }], { text: 'x' }), []);
   });
 
+  test('a symbol tree that refers back to itself terminates', () => {
+    const cls: SymbolLike = { name: 'Loop', kind: SymbolKindNum.Class, range: r(0, 2), children: [] };
+    const method: SymbolLike = { name: 'run', kind: SymbolKindNum.Method, range: r(1, 1, 10), children: [cls] };
+    cls.children!.push(method);
+    const raws = symbolsToRaw([cls], { text: 'class Loop {\n  run() {}\n}' });
+    assert.ok(raws.length >= 1 && raws.length < 100);
+    assert.equal(raws[0].name, 'Loop.run');
+  });
+
   test('malformed provider output is skipped, never thrown on', () => {
     const good = { name: 'ok', kind: SymbolKindNum.Function, range: r(1, 1), children: [null, 5, 'text'] } as unknown as SymbolLike;
     const bad = [

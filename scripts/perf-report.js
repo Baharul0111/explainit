@@ -12,7 +12,8 @@
  *   node scripts/perf-report.js [file...] [--budgets <json>] [--enforce] [--json]
  *   npm run test:integration 2>&1 | tee it.log ; node scripts/perf-report.js it.log
  *
- * Exit 0 always, unless --enforce is given and a p95 exceeds its budget (then 1). No dependencies.
+ * Exit 0 always, unless --enforce is given and a p95 exceeds its budget (then 1); 2 when an input or
+ * budgets file cannot be read. No dependencies.
  */
 'use strict';
 const fs = require('fs');
@@ -102,20 +103,60 @@ function render(rows) {
   return lines.join('\n');
 }
 
+/** Read a budgets JSON file: { "<name substring>": <ms>, ... }. Throws a plain-English error. */
+function loadBudgets(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    throw new Error(`cannot read the budgets file ${file}: ${e.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`the budgets file ${file} is not valid JSON: ${e.message}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`the budgets file ${file} must be an object of { "name": milliseconds }`);
+  const out = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) throw new Error(`the budget for "${k}" in ${file} must be a positive number of milliseconds, got ${JSON.stringify(v)}`);
+    out[k] = v;
+  }
+  return out;
+}
+
 function parseCliArgs(argv) {
-  const o = { files: [], budgets: DEFAULT_BUDGETS, enforce: false, json: false };
+  const o = { files: [], budgets: DEFAULT_BUDGETS, enforce: false, json: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--budgets') o.budgets = JSON.parse(fs.readFileSync(argv[++i], 'utf8'));
+    if (a === '--budgets') {
+      const f = argv[++i];
+      if (!f) throw new Error('--budgets needs a JSON file');
+      o.budgets = loadBudgets(f);
+    } else if (a.startsWith('--budgets=')) o.budgets = loadBudgets(a.slice(10));
     else if (a === '--enforce') o.enforce = true;
     else if (a === '--json') o.json = true;
+    else if (a === '--help' || a === '-h') o.help = true;
+    else if (a.startsWith('-') && a !== '-') throw new Error(`Unknown argument "${a}". Usage: perf-report.js [file...] [--budgets <json>] [--enforce] [--json]`);
     else o.files.push(a);
   }
   return o;
 }
 
+/** Concatenate the input files (or stdin when none). A missing file is a plain-English error. */
 function readInput(files) {
-  if (files.length) return files.map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+  if (files.length) {
+    return files
+      .map((f) => {
+        try {
+          return fs.readFileSync(f === '-' ? 0 : f, 'utf8');
+        } catch (e) {
+          throw new Error(`cannot read ${f}: ${e.message}`);
+        }
+      })
+      .join('\n');
+  }
   try {
     return fs.readFileSync(0, 'utf8');
   } catch {
@@ -124,13 +165,25 @@ function readInput(files) {
 }
 
 function main(argv) {
-  const opts = parseCliArgs(argv);
-  const rows = applyBudgets(summarise(parsePerf(readInput(opts.files))), opts.budgets);
+  let opts;
+  let text;
+  try {
+    opts = parseCliArgs(argv);
+    if (opts.help) {
+      console.log('Usage: node scripts/perf-report.js [file...] [--budgets <json>] [--enforce] [--json]');
+      return 0;
+    }
+    text = readInput(opts.files);
+  } catch (e) {
+    console.error(`perf-report: ${e.message}`);
+    return 2;
+  }
+  const rows = applyBudgets(summarise(parsePerf(text)), opts.budgets);
   if (opts.json) console.log(JSON.stringify(rows, null, 2));
   else console.log(render(rows));
   return opts.enforce && rows.some((r) => r.over) ? 1 : 0;
 }
 
-module.exports = { parsePerf, summarise, applyBudgets, render, percentile, DEFAULT_BUDGETS, main };
+module.exports = { parsePerf, summarise, applyBudgets, render, percentile, loadBudgets, parseCliArgs, readInput, DEFAULT_BUDGETS, main };
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));

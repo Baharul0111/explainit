@@ -13,6 +13,7 @@ const ALL_AGENTS: AgentKind[] = ['claude', 'codex', 'copilot'];
 
 export function createInstructionsGenerator(deps: CoreDeps): InstructionsGenerator {
   const log = deps.logger.child('instructions');
+  let tmpCounter = 0;
   return {
     sectionText,
     async ensure(folder, opts) {
@@ -35,7 +36,7 @@ export function createInstructionsGenerator(deps: CoreDeps): InstructionsGenerat
             continue;
           }
           fs.mkdirSync(path.dirname(file), { recursive: true });
-          const tmp = `${file}.${process.pid}.explainit-tmp`;
+          const tmp = `${file}.${process.pid}.${++tmpCounter}.explainit-tmp`;
           fs.writeFileSync(tmp, r.text, 'utf8');
           fs.renameSync(tmp, file);
           written.push(file);

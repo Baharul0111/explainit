@@ -8,8 +8,14 @@ const perf = require(path.join(REPO_ROOT, 'scripts', 'perf-report.js')) as {
   applyBudgets(rows: ReturnType<typeof perf.summarise>, budgets: Record<string, number>): (ReturnType<typeof perf.summarise>[number] & { budget?: number; over: boolean })[];
   render(rows: ReturnType<typeof perf.applyBudgets>): string;
   percentile(sorted: number[], p: number): number;
+  loadBudgets(file: string): Record<string, number>;
+  parseCliArgs(argv: string[]): { files: string[]; budgets: Record<string, number>; enforce: boolean; json: boolean; help: boolean };
+  readInput(files: string[]): string;
+  main(argv: string[]): number;
   DEFAULT_BUDGETS: Record<string, number>;
 };
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 
 suite('scripts/perf-report', () => {
   test('parsePerf recognises [perf], PERF and mocha markers and ignores the rest', () => {
@@ -65,6 +71,48 @@ suite('scripts/perf-report', () => {
     assert.equal(byName['first explanation streamed'].over, false);
     assert.equal(byName['unbudgeted'].budget, undefined);
     assert.equal(byName['unbudgeted'].over, false);
+  });
+
+  test('bad budgets files and missing input files are plain-English errors, never stack traces', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'explainit-perf-'));
+    try {
+      const budgets = path.join(dir, 'b.json');
+      fs.writeFileSync(budgets, JSON.stringify({ 'gate panel': 250 }));
+      assert.deepEqual(perf.loadBudgets(budgets), { 'gate panel': 250 });
+      assert.deepEqual(perf.parseCliArgs(['--budgets', budgets, 'a.log', '--enforce']).budgets, { 'gate panel': 250 });
+      assert.deepEqual(perf.parseCliArgs([`--budgets=${budgets}`]).budgets, { 'gate panel': 250 });
+      fs.writeFileSync(budgets, '{oops');
+      assert.throws(() => perf.loadBudgets(budgets), /not valid JSON/);
+      fs.writeFileSync(budgets, '[1]');
+      assert.throws(() => perf.loadBudgets(budgets), /must be an object/);
+      fs.writeFileSync(budgets, JSON.stringify({ x: 'fast' }));
+      assert.throws(() => perf.loadBudgets(budgets), /budget for "x" .* positive number/);
+      fs.writeFileSync(budgets, JSON.stringify({ x: -1 }));
+      assert.throws(() => perf.loadBudgets(budgets), /positive number/);
+      assert.throws(() => perf.loadBudgets(path.join(dir, 'missing.json')), /cannot read the budgets file/);
+      assert.throws(() => perf.parseCliArgs(['--budgets']), /--budgets needs a JSON file/);
+      assert.throws(() => perf.parseCliArgs(['--wat']), /Unknown argument/);
+      assert.throws(() => perf.readInput([path.join(dir, 'nope.log')]), /cannot read .*nope\.log/);
+      const log = path.join(dir, 'it.log');
+      fs.writeFileSync(log, '[perf] gate panel: 900 ms\n');
+      assert.equal(perf.readInput([log]), '[perf] gate panel: 900 ms\n');
+      // main: exit 2 on unreadable input, 1 with --enforce over budget, 0 otherwise.
+      const silence = console.error;
+      const quiet = console.log;
+      console.error = () => {};
+      console.log = () => {};
+      try {
+        assert.equal(perf.main([path.join(dir, 'nope.log')]), 2);
+        assert.equal(perf.main([log, '--enforce']), 1);
+        assert.equal(perf.main([log]), 0);
+        assert.equal(perf.main(['--help']), 0);
+      } finally {
+        console.error = silence;
+        console.log = quiet;
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('render prints a table, budgets, and a clear empty state', () => {

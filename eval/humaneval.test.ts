@@ -1,5 +1,6 @@
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { EVAL_PATHS } from './paths';
 import { NO_NETWORK_PRELUDE, buildTestProgram, extractPythonCode, functionTextForExplain, parseSubset, pickSpread, preambleForContext, splitPrompt, type HumanEvalProblem } from './pure/humaneval';
 
@@ -30,7 +31,7 @@ suite('eval/pure/humaneval: subset file', () => {
       assert.ok(!text.includes('"""') && !text.includes(">>>"), `${p.task_id} explain text has no docstring`);
       assert.ok(text.includes(p.canonical_solution.trim().split('\n')[0].trim()));
     }
-    assert.ok(fs.existsSync(EVAL_PATHS.dir() + '/LICENSE-humaneval.txt'), 'MIT notice ships beside the data');
+    assert.ok(fs.existsSync(path.join(EVAL_PATHS.dir(), 'LICENSE-humaneval.txt')), 'MIT notice ships beside the data');
   });
 
   test('parseSubset accepts a bare array and rejects bad shapes with plain messages', () => {
@@ -61,6 +62,22 @@ suite('eval/pure/humaneval: splitting and building', () => {
     assert.throws(() => splitPrompt('def broken(', 'broken'), /end of the signature/);
   });
 
+  test('splitPrompt picks the target, not a helper whose name contains it', () => {
+    const prompt = 'def flip_case_helper(s: str) -> str:\n    return s\n\n\ndef helper_flip_case(s):\n    return s\n\n\ndef flip_case(string: str) -> str:\n    """ Flip. """\n';
+    const s = splitPrompt(prompt, 'flip_case');
+    assert.strictEqual(s.signature, 'def flip_case(string: str) -> str:');
+    assert.ok(s.preamble.includes('def flip_case_helper') && s.preamble.includes('def helper_flip_case'));
+    // Regex metacharacters in an entry point never reach the pattern unescaped.
+    assert.throws(() => splitPrompt(prompt, 'flip.case'), /does not define "flip\.case"/);
+  });
+
+  test('splitPrompt with no preamble and a signature carrying a trailing comment', () => {
+    const s = splitPrompt('def f(a):  # colon: inside a comment\n    """doc"""\n', 'f');
+    assert.strictEqual(s.preamble, '');
+    assert.strictEqual(s.signature, 'def f(a):  # colon: inside a comment');
+    assert.strictEqual(s.docstring.trim(), '"""doc"""');
+  });
+
   test('functionTextForExplain is signature + canonical body only', () => {
     const text = functionTextForExplain(SAMPLE);
     assert.ok(text.startsWith('def has_close_elements(numbers: List[float], threshold: float) -> bool:\n    for idx, elem'));
@@ -77,6 +94,14 @@ suite('eval/pure/humaneval: splitting and building', () => {
     // Bare code after prose.
     assert.strictEqual(extractPythonCode('Here you go:\nfrom typing import List\ndef f(a):\n    return a\n', 'f'), 'from typing import List\ndef f(a):\n    return a\n');
     assert.strictEqual(extractPythonCode('def f(a):\n    return a', 'f'), 'def f(a):\n    return a\n');
+    // CRLF replies, a python3 tag, and an unclosed fence.
+    assert.strictEqual(extractPythonCode('```python3\r\ndef f(a):\r\n    return a\r\n```\r\n', 'f'), 'def f(a):\n    return a\n');
+    assert.strictEqual(extractPythonCode('```python\ndef f(a):\n    return a\n', 'f'), 'def f(a):\n    return a\n', 'an unclosed fence still yields the code after it');
+    // A huge reply (a 2 MB fence) is handled quickly.
+    const big = '```python\ndef f(a):\n' + '    a = a + 1\n'.repeat(150_000) + '    return a\n```';
+    const t0 = Date.now();
+    assert.ok(extractPythonCode(big, 'f').startsWith('def f(a):\n'));
+    assert.ok(Date.now() - t0 < 5_000, 'extraction stays fast on a huge reply');
     // Nothing code-like.
     assert.strictEqual(extractPythonCode('I cannot do that.', 'f'), '');
     assert.strictEqual(extractPythonCode('', 'f'), '');

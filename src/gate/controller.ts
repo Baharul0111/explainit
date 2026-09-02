@@ -22,6 +22,8 @@ import { computeHunks, reconstruct } from './pure/differ';
 import { detectEol, languageIdForPath, withEol } from './pure/text';
 
 export const REVIEW_SIZE_CAP = 2 * 1024 * 1024;
+/** Files larger than this are never read into memory for a proposal (the hook body cap is 8 MB too). */
+export const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const STRUCTURE_TIMEOUT_MS = 20_000;
 const TWIN_UPDATE_TIMEOUT_MS = 180_000;
 const POST_FALLBACK_MS = 10_000;
@@ -52,8 +54,44 @@ function readFileOrNull(p: string): string | null {
   }
 }
 
+/** Like readFileOrNull, but refuses to load a huge file: the caller answers `ask` with the message. */
+function readSourceOrNull(p: string): string | null {
+  let size: number;
+  try {
+    const st = fs.statSync(p);
+    if (!st.isFile()) return null;
+    size = st.size;
+  } catch {
+    return null;
+  }
+  if (size > MAX_SOURCE_BYTES) {
+    throw new Error(`the file ${path.basename(p)} is larger than ${MAX_SOURCE_BYTES / 1024 / 1024} MB, too big to review function by function`);
+  }
+  return readFileOrNull(p);
+}
+
 function hashText(t: string | null): string | null {
   return t === null ? null : sha256(normalizeNewlines(t));
+}
+
+/**
+ * Collapse a Decision into what the gate acts on. A partial decision whose per-hunk verdicts all
+ * agree is not partial; with no hunks at all the decision's own verdict stands.
+ */
+export function normalizeVerdict(decision: Decision, hunks: FunctionHunk[]): 'accept' | 'reject' | 'partial' | 'ask' | 'none' | 'deny' {
+  if (decision.verdict === 'paused') return 'none';
+  if (decision.verdict === 'deny-protected') return 'deny';
+  if (decision.verdict === 'ask') return 'ask';
+  if (decision.verdict === 'auto') return 'accept';
+  if (hunks.length === 0) return decision.verdict === 'accept' ? 'accept' : 'reject';
+  const hv = decision.hunkVerdicts;
+  if (decision.verdict === 'partial' || (hv && Object.keys(hv).length)) {
+    const verdicts = hunks.map((h) => hv?.[h.id] ?? (decision.verdict === 'accept' ? 'accept' : 'reject'));
+    if (verdicts.every((x) => x === 'accept')) return 'accept';
+    if (verdicts.every((x) => x === 'reject')) return 'reject';
+    return 'partial';
+  }
+  return decision.verdict === 'accept' ? 'accept' : 'reject';
 }
 
 export class GateController {
@@ -150,7 +188,7 @@ export class GateController {
 
     // Build the proposed writes.
     const io: ProposalIo = {
-      readFile: readFileOrNull,
+      readFile: readSourceOrNull,
       resolve: (raw) => resolveTarget(raw, v.cwd, folders).path,
     };
     const built = v.category === 'patch' ? buildPatchWrites(v.toolInput, io) : buildClaudeWrites(v.toolName, v.toolInput, io);
@@ -245,6 +283,10 @@ export class GateController {
         clearTimeout(exp.timer);
         this.expected.delete(p);
       }
+      // Only writes we could have reviewed are journaled; twin files are ExplainIT's own output.
+      if (!exp && resolveTarget(p, v.cwd, folders).confinement === 'outside') continue;
+      recordLanding(p);
+      if (this.deps.twin.isTwinPath(p)) continue;
       const onDisk = hashText(readFileOrNull(p));
       const note = exp ? (exp.hash === onDisk ? 'match' : 'mismatch') : 'unexpected';
       try {
@@ -260,7 +302,6 @@ export class GateController {
         this.log.warn(`${requestId} journal append failed`, e);
       }
       if (note === 'mismatch') this.log.warn(`${requestId} ${p}: on-disk content differs from the reviewed proposal`);
-      recordLanding(p);
       this.updateTwin(p, requestId);
     }
     return NONE;
@@ -319,8 +360,10 @@ export class GateController {
     };
     const allHunks = writes.flatMap((w) => hunksByPath[w.path]);
     if (allHunks.length === 0) {
-      // Nothing changes on disk (e.g. identical content): nothing to review.
-      return allow();
+      // Identical content: nothing changes on disk, nothing to review. Creating or deleting an
+      // empty file still changes the disk with nothing to show, so that goes to the agent's own prompt.
+      const identical = writes.every((w) => w.kind === 'modify' && normalizeNewlines(w.before ?? '') === normalizeNewlines(w.after ?? ''));
+      return identical ? allow() : NONE;
     }
 
     // Decision memory: "accept rest of file/session" or identical accepted hunks cover everything.
@@ -361,7 +404,7 @@ export class GateController {
     }
     if (this.disposed) return ask('ExplainIT was shut down during the review. Your normal permission prompt decides.');
 
-    const verdict = this.normalizeVerdict(decision, allHunks);
+    const verdict = normalizeVerdict(decision, allHunks);
     switch (verdict) {
       case 'accept':
         await this.commitAccepted(request, decision);
@@ -382,22 +425,6 @@ export class GateController {
       default:
         return deny(decision.reason ?? 'ExplainIT refused this change.');
     }
-  }
-
-  /** Collapse the Decision into what we act on; a partial with everything accepted/rejected is not partial. */
-  private normalizeVerdict(decision: Decision, hunks: FunctionHunk[]): 'accept' | 'reject' | 'partial' | 'ask' | 'none' | 'deny' {
-    if (decision.verdict === 'paused') return 'none';
-    if (decision.verdict === 'deny-protected') return 'deny';
-    if (decision.verdict === 'ask') return 'ask';
-    if (decision.verdict === 'auto') return 'accept';
-    const hv = decision.hunkVerdicts;
-    if (decision.verdict === 'partial' || (hv && Object.keys(hv).length)) {
-      const verdicts = hunks.map((h) => hv?.[h.id] ?? (decision.verdict === 'accept' ? 'accept' : 'reject'));
-      if (verdicts.every((x) => x === 'accept')) return 'accept';
-      if (verdicts.every((x) => x === 'reject')) return 'reject';
-      return 'partial';
-    }
-    return decision.verdict === 'accept' ? 'accept' : 'reject';
   }
 
   private explain(request: GateRequest, hunk: FunctionHunk, onText: (chunk: string) => void, token: CancelToken): Promise<ChangeExplanation> {
@@ -484,6 +511,17 @@ export class GateController {
       landed.push(...acceptedHere.map(label));
       rejected.push(...rejectedHere.map(label));
       if (acceptedHere.length === 0) continue;
+
+      // The proposal was computed against `before`; if the file moved on while the person was
+      // reviewing (another tool call, a concurrent agent), landing the reconstruction would clobber it.
+      const onDisk = readFileOrNull(w.path);
+      if (hashText(onDisk) !== hashText(w.before)) {
+        this.log.warn(`${request.id} ${w.path} changed on disk during the review; nothing was written`);
+        await this.journal(w.path, { kind: 'decided', requestId: request.id, agent: request.agent, path: w.path, decision, beforeHash: hashText(w.before), afterHash: hashText(onDisk), note: 'partial acceptance not applied: the file changed on disk during the review' });
+        return deny(
+          `Partly accepted by the person, but ${path.basename(w.path)} changed on disk while the review was open, so ExplainIT did not write anything. Re-read the file and propose the change again.`,
+        );
+      }
 
       const checkpointId = await this.checkpoint(w, request.id, request.agent);
       const rel = path.relative(process.cwd(), w.path);

@@ -9,7 +9,14 @@
  *     documentation and are allowed.
  *   - Imports of Node modules that only exist to talk to the outside world: https, dns, tls, net,
  *     dgram, http2 (type-only imports are fine: they vanish at build time).
- *   - Browser network APIs in webview code: XMLHttpRequest, WebSocket, sendBeacon, EventSource.
+ *   - Network APIs: XMLHttpRequest, WebSocket, EventSource, sendBeacon, and a bare fetch() call
+ *     (Node 22 has a global fetch, so it reaches the network from the extension host just as well).
+ *     `symbols.fetch(...)` (a method) and `fetch(uri: Uri): Promise<X>` (a member declaration) are not
+ *     the global fetch. The bare-fetch rule is applied to source roots only: a minified bundle under
+ *     dist/ cannot be told apart from its own method definitions; its literal URLs and network-module
+ *     requires are still checked there.
+ *   Each API finding carries a short snippet around the match, so a report about a one-line minified
+ *   bundle points at the right place and "knownBenign" entries can name the exact call.
  *
  * Exit 0 when clean, 1 with a file:line list and what to do next. Plain Node, no dependencies.
  *   node scripts/check-no-network.js [--root <dir>]... [--allowlist <file>] [--json]
@@ -33,7 +40,11 @@ const MODULE_RE = new RegExp(
   `\\brequire\\(\\s*['"](?:node:)?(?:${NET_MODULES})['"]\\s*\\)|\\bfrom\\s+['"](?:node:)?(?:${NET_MODULES})['"]|\\bimport\\s+['"](?:node:)?(?:${NET_MODULES})['"]|\\bimport\\(\\s*['"](?:node:)?(?:${NET_MODULES})['"]\\s*\\)`,
 );
 const TYPE_IMPORT_RE = /\bimport\s+type\b/;
-const BROWSER_API_RE = /\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\s*\(|\bnavigator\.sendBeacon\s*\(/;
+const API_RE = /\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\s*\(|\bnavigator\.sendBeacon\s*\(|(?<![.\w$])(?:globalThis\.|global\.|window\.|self\.)?fetch\s*\(/g;
+const BARE_FETCH_RE = /^(?:globalThis\.|global\.|window\.|self\.)?fetch/;
+// `  fetch(uri: Uri): Promise<X>;` or `  async fetch(u) {`: a member declaration at the start of a line.
+const MEMBER_DECL_RE = /^\s*(?:(?:public|private|protected|static|async|readonly|abstract|override)\s+)*fetch\s*\(/;
+const BUNDLE_RE = /^dist\//;
 const COMMENT_LINE_RE = /^\s*(?:\/\/|\*|\/\*|#|<!--)/;
 
 function loadAllowlist(file) {
@@ -101,11 +112,23 @@ function scanText(text, file, allow) {
     if (!fileAllowed && MODULE_RE.test(line) && !TYPE_IMPORT_RE.test(line)) {
       findings.push({ file, line: i + 1, kind: 'module', text: line.trim().slice(0, 160) });
     }
-    if (!fileAllowed && BROWSER_API_RE.test(line)) {
-      findings.push({ file, line: i + 1, kind: 'api', text: line.trim().slice(0, 160) });
+    if (!fileAllowed) {
+      const isBundle = BUNDLE_RE.test(toPosix(file));
+      API_RE.lastIndex = 0;
+      while ((m = API_RE.exec(line))) {
+        if (BARE_FETCH_RE.test(m[0]) && (isBundle || MEMBER_DECL_RE.test(line))) continue;
+        findings.push({ file, line: i + 1, kind: 'api', text: snippet(line, m.index, m[0].length) });
+      }
     }
   }
   return findings.filter((f) => !isKnownBenign(f, allow));
+}
+
+/** A short window of text around a match (minified bundles put a whole program on one line). */
+function snippet(line, index, length) {
+  const start = Math.max(0, index - 40);
+  const end = Math.min(line.length, index + length + 80);
+  return `${start > 0 ? '...' : ''}${line.slice(start, end).trim()}${end < line.length ? '...' : ''}`;
 }
 
 function listFiles(root) {
@@ -165,7 +188,7 @@ function explain(kind) {
     case 'module':
       return 'imports a network module';
     case 'api':
-      return 'uses a browser network API';
+      return 'uses a network API (fetch, XMLHttpRequest, WebSocket, EventSource, sendBeacon)';
     default:
       return kind;
   }
@@ -229,6 +252,6 @@ function main(argv) {
   return 1;
 }
 
-module.exports = { scanText, scanRoots, listFiles, loadAllowlist, isLoopbackUrl, isAllowedUrl, isKnownBenign, parseCliArgs, DEFAULT_ROOTS, main };
+module.exports = { scanText, scanRoots, listFiles, loadAllowlist, isLoopbackUrl, isAllowedUrl, isKnownBenign, snippet, parseCliArgs, DEFAULT_ROOTS, main };
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));

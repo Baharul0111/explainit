@@ -1,5 +1,5 @@
 import * as assert from 'node:assert';
-import { MAX_HISTORY, compareNewestToPrevious, emptyBaseline, fmt, previewRegression, promptChangedMessage, updateBaseline, validateBaseline, type Baseline, type ChannelScore, type HistoryEntry } from './pure/baseline';
+import { MAX_HISTORY, compareNewestToPrevious, emptyBaseline, fmt, parseBaselineText, previewRegression, promptChangedMessage, staleChannels, staleChannelsMessage, updateBaseline, validateBaseline, type Baseline, type ChannelScore, type HistoryEntry } from './pure/baseline';
 
 const H1 = 'a'.repeat(64);
 const H2 = 'b'.repeat(64);
@@ -136,5 +136,52 @@ suite('eval/pure/baseline: validation and messages', () => {
     assert.strictEqual(fmt(0.8333), '83.3%');
     assert.strictEqual(fmt(1), '100%');
     assert.strictEqual(fmt(0), '0%');
+  });
+});
+
+suite('eval/pure/baseline: stale channels after a prompt change', () => {
+  test('all channels measured with the current prompts -> nothing is stale', () => {
+    let b = updateBaseline(undefined, 'claude', score(1, 1, '2026-09-01T00:00:00.000Z'), H1);
+    b = updateBaseline(b, 'codex', score(1, 1, '2026-09-02T00:00:00.000Z'), H1);
+    b = updateBaseline(b, 'fake', score(0.9, 1, '2026-09-03T00:00:00.000Z'), H1);
+    assert.deepStrictEqual(staleChannels(b), []);
+  });
+
+  test('re-running only one channel after a prompt change leaves the others stale (fake is exempt)', () => {
+    let b = updateBaseline(undefined, 'claude', score(1, 1, '2026-09-01T00:00:00.000Z'), H1);
+    b = updateBaseline(b, 'codex', score(1, 1, '2026-09-02T00:00:00.000Z'), H1);
+    b = updateBaseline(b, 'fake', score(0.9, 1, '2026-09-03T00:00:00.000Z'), H1);
+    b = updateBaseline(b, 'claude', score(1, 1, '2026-09-04T00:00:00.000Z'), H2);
+    assert.deepStrictEqual(staleChannels(b), [{ channel: 'codex', measuredWith: H1 }]);
+    const msg = staleChannelsMessage(staleChannels(b), H2);
+    assert.ok(msg.startsWith('Prompts changed without re-running the eval: run npm run eval -- --channel codex --update-baseline'), msg);
+    assert.ok(msg.includes(`codex was measured with prompt hash ${H1.slice(0, 12)}…`), msg);
+    // Re-running codex clears it.
+    b = updateBaseline(b, 'codex', score(1, 1, '2026-09-05T00:00:00.000Z'), H2);
+    assert.deepStrictEqual(staleChannels(b), []);
+  });
+
+  test('a score with no matching history run is reported as stale with an unknown hash', () => {
+    const b: Baseline = { promptHash: H1, scores: { claude: score(1, 1) }, history: [] };
+    assert.deepStrictEqual(staleChannels(b), [{ channel: 'claude', measuredWith: undefined }]);
+    assert.ok(staleChannelsMessage(staleChannels(b), H1).includes('(unknown)'));
+  });
+});
+
+suite('eval/pure/baseline: parseBaselineText (corrupt or empty files)', () => {
+  test('empty, whitespace-only and truncated files give plain-English errors, never a throw', () => {
+    assert.strictEqual(parseBaselineText('').error, 'eval/baseline.json is empty.');
+    assert.strictEqual(parseBaselineText('   \n').error, 'eval/baseline.json is empty.');
+    const truncated = JSON.stringify(emptyBaseline(H1)).slice(0, 20);
+    assert.match(parseBaselineText(truncated).error!, /^eval\/baseline\.json is not valid JSON: /);
+    assert.match(parseBaselineText('[]').error!, /promptHash/);
+    assert.match(parseBaselineText('"a string"').error!, /not a JSON object/);
+  });
+
+  test('a good file parses', () => {
+    const b = updateBaseline(undefined, 'fake', score(1, 1), H1);
+    const r = parseBaselineText(JSON.stringify(b, null, 2) + '\n');
+    assert.strictEqual(r.error, undefined);
+    assert.deepStrictEqual(r.baseline, b);
   });
 });

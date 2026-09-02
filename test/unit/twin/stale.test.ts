@@ -112,6 +112,28 @@ suite('twin/pure/stale (sidecar merge)', () => {
     assert.deepStrictEqual(noTwin.entries.map((e) => e.reason), ['missing', 'missing']);
   });
 
+  test('a lost or corrupt sidecar never wipes an existing twin: sections are kept, marked stale, and regenerated only when allowed', () => {
+    const { parsed } = existing([a, b]);
+    // markStale (no model call) with no sidecar: every explanation survives, shown as out of date.
+    const none = planSections(mapOf(a, b), undefined, parsed, { kind: 'none' });
+    assert.strictEqual(none.toGenerate.length, 0);
+    assert.deepStrictEqual(toRenderSections(none, new Map()), [
+      { name: 'a', content: content('a'), stale: true },
+      { name: 'b', content: content('b'), stale: true },
+    ]);
+    const sections = toSidecarSections(none, new Map(), renderTwin('app.py', toRenderSections(none, new Map())).sections);
+    assert.deepStrictEqual(sections.map((s) => [s.functionId, s.contentHash, s.stale]), [['a#0', '', true], ['b#0', '', true]]);
+    // ensureTwin / updateAfterChange regenerate them (the router's cache answers when the code is unchanged).
+    const changed = planSections(mapOf(a, b), undefined, parsed, { kind: 'changed' });
+    assert.deepStrictEqual(changed.entries.map((e) => e.reason), ['changed', 'changed']);
+    assert.deepStrictEqual(changed.entries.map((e) => e.content), [content('a'), content('b')], 'old words kept as the fallback');
+    // Placeholders in the twin are not "explanations" to recover.
+    const withPlaceholder = parseTwin(renderTwin('app.py', [{ name: 'a', content: content('a') }, { name: 'b', state: 'unavailable' }]).text);
+    assert.deepStrictEqual(planSections(mapOf(a, b), undefined, withPlaceholder, { kind: 'none' }).entries.map((e) => e.reason), ['changed', 'new']);
+    // No twin and no sidecar: a fresh file.
+    assert.deepStrictEqual(planSections(mapOf(a), undefined, undefined, { kind: 'changed' }).entries.map((e) => e.reason), ['new']);
+  });
+
   test('a hand-edited twin whose section names no longer match is regenerated rather than trusted', () => {
     const { sidecar } = existing([a]);
     const edited = parseTwin(renderTwin('app.py', [{ name: 'renamed', content: content('z') }]).text);

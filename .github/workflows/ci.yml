@@ -81,6 +81,9 @@ jobs:
       - name: Package the VSIX (vsce --no-dependencies)
         run: npm run package
 
+      - name: The VSIX contains only what ships (no sources, tests, scratch folders or .env)
+        run: node scripts/check-vsix.js
+
       - name: Fresh VS Code install smoke test (Linux, under xvfb)
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:install
@@ -141,6 +144,9 @@ jobs:
             exit 1
           fi
           echo "OK: no unexpected http(s) URLs in src/ or hooks/."
+
+      - name: Workflow, dependabot and issue-template YAML are well-formed
+        run: node scripts/check-workflows.js
 
       - name: Hook script is dependency-free plain CommonJS
         shell: bash

@@ -11,21 +11,27 @@ import type { Disposable, ExplanationCache } from '../src/core/interfaces';
 import { createLogger } from '../src/core/log';
 import { inMemorySettings } from '../src/core/settings';
 import { createGenerationRouter } from '../src/generation';
-import { EVAL_PATHS } from './paths';
-import { compareNewestToPrevious, promptChangedMessage, validateBaseline, type Baseline } from './pure/baseline';
+import { EVAL_PATHS, repoRoot } from './paths';
+import { compareNewestToPrevious, parseBaselineText, promptChangedMessage, staleChannels, staleChannelsMessage, type Baseline } from './pure/baseline';
 
 function memoryCache(): ExplanationCache {
   const m = new Map();
   return { get: (h) => m.get(h), set: (h, e) => void m.set(h, e), has: (h) => m.has(h), size: () => m.size, flush: async () => undefined };
 }
 
+/** Load eval/baseline.json; a missing, empty or corrupt file fails with the plain-English fix. */
 function loadBaseline(): Baseline {
   const file = EVAL_PATHS.baseline();
-  assert.ok(fs.existsSync(file), `No eval baseline at ${path.relative(process.cwd(), file)}. ${promptChangedMessage(['claude', 'codex', 'fake'])}`);
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
-  const problems = validateBaseline(parsed);
-  assert.deepStrictEqual(problems, [], `eval/baseline.json is malformed: ${problems.join(' ')}`);
-  return parsed as Baseline;
+  const rel = path.relative(repoRoot(), file);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    assert.fail(`No eval baseline at ${rel}. ${promptChangedMessage(['claude', 'codex', 'fake'])}`);
+  }
+  const parsed = parseBaselineText(raw);
+  assert.ok(parsed.baseline, `${rel} cannot be used: ${parsed.error} Delete it and ${promptChangedMessage(['claude', 'codex', 'fake']).replace(/^Prompts changed without re-running the eval: /, '')}`);
+  return parsed.baseline;
 }
 
 suite('eval/baseline lock', () => {
@@ -43,7 +49,7 @@ suite('eval/baseline lock', () => {
     const router = createGenerationRouter({
       logger: quiet,
       settings: inMemorySettings(),
-      extensionPath: path.resolve(__dirname, '..', '..'),
+      extensionPath: repoRoot(),
       version: '0.0.0-test',
       cache: memoryCache(),
       consent: { granted: () => false, setGranted: async () => undefined },
@@ -51,6 +57,12 @@ suite('eval/baseline lock', () => {
     });
     const channels = Object.keys(baseline.scores).filter((c) => c !== 'fake');
     assert.strictEqual(router.promptHash(), baseline.promptHash, promptChangedMessage(channels.length ? channels : ['claude', 'codex']));
+  });
+
+  test('every real channel was measured with the current prompts (no channel left behind after a prompt change)', () => {
+    const baseline = loadBaseline();
+    const stale = staleChannels(baseline);
+    assert.deepStrictEqual(stale, [], staleChannelsMessage(stale, baseline.promptHash));
   });
 
   test('explanation quality did not drop between the two newest eval runs', () => {

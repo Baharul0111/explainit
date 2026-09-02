@@ -59,9 +59,16 @@ export interface TreeSitterServiceOptions {
   parseTimeoutMs?: number;
   /** Timeout for loading the runtime or a grammar. Default 10000. */
   loadTimeoutMs?: number;
+  /**
+   * Texts longer than this (in characters) are not parsed at all: parsing is synchronous on the
+   * extension host and runs at roughly 2 MB/s, so the cap bounds the pause. Default 2,000,000.
+   */
+  maxTextChars?: number;
   /** Test seam: replaces `require('@vscode/tree-sitter-wasm')`. */
   loadModule?: () => TreeSitterModule;
 }
+
+export const DEFAULT_MAX_TEXT_CHARS = 2_000_000;
 
 export interface TreeSitterParseResult {
   functions: RawFunction[];
@@ -297,6 +304,7 @@ export class TreeSitterService {
   private readonly log: Logger | undefined;
   private readonly parseTimeoutMs: number;
   private readonly loadTimeoutMs: number;
+  private readonly maxTextChars: number;
   private readonly loadModule: () => TreeSitterModule;
   private module: TreeSitterModule | undefined;
   private initPromise: Promise<TreeSitterModule> | undefined;
@@ -310,6 +318,7 @@ export class TreeSitterService {
     this.log = opts.logger;
     this.parseTimeoutMs = opts.parseTimeoutMs ?? 3000;
     this.loadTimeoutMs = opts.loadTimeoutMs ?? 10000;
+    this.maxTextChars = opts.maxTextChars ?? DEFAULT_MAX_TEXT_CHARS;
     // Lazy require keeps activation fast; esbuild still bundles the runtime because the specifier is static.
     this.loadModule = opts.loadModule ?? (() => require('@vscode/tree-sitter-wasm') as TreeSitterModule);
   }
@@ -387,11 +396,18 @@ export class TreeSitterService {
 
   /**
    * Parses `text` with the grammar for `languageId`. Returns undefined when the language is not
-   * supported, the runtime cannot load, or parsing was abandoned (timeout / cancellation).
+   * supported, the runtime cannot load, the text is over the size cap, parsing was abandoned
+   * (timeout / cancellation) or the runtime threw; it never rejects, so the caller's next fallback
+   * always gets its turn.
    */
   async parseFunctions(text: string, languageId: string, token?: CancelToken): Promise<TreeSitterParseResult | undefined> {
     const grammar = this.grammarFor(languageId);
     if (!grammar || this.disposed) return undefined;
+    if (typeof text !== 'string') return undefined;
+    if (text.length > this.maxTextChars) {
+      this.log?.debug(`tree-sitter skipped for ${languageId}: ${text.length} characters is over the ${this.maxTextChars} cap`);
+      return undefined;
+    }
     let mod: TreeSitterModule;
     let lang: WTS.Language;
     try {
@@ -402,39 +418,54 @@ export class TreeSitterService {
       return undefined;
     }
     if (token?.isCancellationRequested || this.disposed) return undefined;
-    if (!this.parser) this.parser = new mod.Parser();
-    const parser = this.parser;
-    parser.reset();
-    parser.setLanguage(lang);
-    const deadline = Date.now() + this.parseTimeoutMs;
     const started = Date.now();
-    // Normalised text keeps tree-sitter rows equal to VS Code line numbers for \r\n and lone \r files.
-    const tree = parser.parse(normalizeNewlines(text), null, {
-      progressCallback: () => Date.now() > deadline || token?.isCancellationRequested === true,
-    });
-    if (!tree) {
-      parser.reset();
-      this.log?.warn(`tree-sitter parse of ${languageId} abandoned after ${Date.now() - started}ms`);
-      return undefined;
-    }
+    let tree: WTS.Tree | null = null;
     try {
+      if (!this.parser) this.parser = new mod.Parser();
+      const parser = this.parser;
+      parser.reset();
+      parser.setLanguage(lang);
+      const deadline = Date.now() + this.parseTimeoutMs;
+      // Normalised text keeps tree-sitter rows equal to VS Code line numbers for \r\n and lone \r files.
+      tree = parser.parse(normalizeNewlines(text), null, {
+        progressCallback: () => Date.now() > deadline || token?.isCancellationRequested === true,
+      });
+      if (!tree) {
+        parser.reset();
+        this.log?.warn(`tree-sitter parse of ${languageId} abandoned after ${Date.now() - started}ms`);
+        return undefined;
+      }
       const functions = extractFunctions(tree.rootNode, grammar);
       const hasError = tree.rootNode.hasError;
       this.log?.debug(`tree-sitter ${languageId}: ${functions.length} functions in ${Date.now() - started}ms${hasError ? ' (syntax errors)' : ''}`);
       return { functions, hasError };
+    } catch (e) {
+      // A wasm abort (out of memory on a pathological input, a corrupt grammar) leaves the parser in an
+      // unknown state: drop it so the next call starts from a fresh one, and let the caller fall back.
+      this.log?.warn(`tree-sitter failed while parsing ${languageId}: ${(e as Error).message}`);
+      this.discardParser();
+      return undefined;
     } finally {
-      tree.delete();
+      try {
+        tree?.delete();
+      } catch {
+        /* already gone */
+      }
     }
   }
 
-  dispose(): void {
-    this.disposed = true;
+  private discardParser(): void {
     try {
       this.parser?.delete();
     } catch {
       /* ignore */
     }
     this.parser = undefined;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.discardParser();
     this.languageCache.clear();
   }
 }

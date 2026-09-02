@@ -144,9 +144,12 @@ export function buildPatchWrites(toolInput: Record<string, unknown>, io: Proposa
   return { ok: true, writes };
 }
 
-/** Total proposed bytes (for the 2 MB review cap). */
+/**
+ * Bytes the review would have to handle (for the 2 MB cap): per write the larger side of the
+ * change, so a delete or a shrink of a huge file counts as much as writing it.
+ */
 export function proposalSize(writes: ProposedWrite[]): number {
   let n = 0;
-  for (const w of writes) n += Buffer.byteLength(w.after ?? '', 'utf8');
+  for (const w of writes) n += Math.max(Buffer.byteLength(w.after ?? '', 'utf8'), Buffer.byteLength(w.before ?? '', 'utf8'));
   return n;
 }

@@ -3,12 +3,12 @@
  * outline it. One TextDocumentContentProvider for the `explainit-proposed` scheme serves texts kept
  * in a map keyed by a random id; the entry is removed as soon as the caller releases it.
  */
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { withTimeout } from '../core/cancel';
 import { randomId } from '../core/hash';
 import type { CancelToken, Disposable } from '../core/interfaces';
 import type { Logger } from '../core/log';
+import { hintBasename } from './pure/normalize';
 
 export const PROPOSED_SCHEME = 'explainit-proposed';
 const OPEN_TIMEOUT_MS = 5000;
@@ -27,17 +27,7 @@ export interface ProposedDocuments {
 }
 
 /** Basename of a uri string or path, sanitised for a virtual path; keeps the extension so the language is inferred. */
-export function proposedBasename(uriHint: string): string {
-  let base = '';
-  try {
-    base = uriHint.includes('://') ? path.posix.basename(vscode.Uri.parse(uriHint).path) : path.basename(uriHint);
-  } catch {
-    base = path.basename(uriHint);
-  }
-  base = base.replace(/[^\w.+-]/g, '_');
-  if (!base || base === '.' || base === '..') base = 'proposed.txt';
-  return base;
-}
+export const proposedBasename = (uriHint: string): string => hintBasename(uriHint);
 
 export function createProposedDocuments(disposables: Disposable[], log: Logger): ProposedDocuments {
   const texts = new Map<string, string>();

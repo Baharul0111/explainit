@@ -14,7 +14,6 @@
  * without spending anyone's credits. Output mimics `--output-format json` and `stream-json`.
  */
 'use strict';
-/* eslint-disable @typescript-eslint/no-require-imports -- plain CommonJS script run by node directly */
 const fs = require('node:fs');
 const path = require('node:path');
 

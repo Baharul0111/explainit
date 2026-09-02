@@ -68,10 +68,12 @@ export function writeWrappers(hooksDir: string, runtime: NodeRuntime, scriptPath
   return { sh: { path: sh, hash: sha256(shText) }, cmd: { path: cmd, hash: sha256(cmdText) } };
 }
 
-/** Write via a temp file + rename so a crash never leaves a half-written hook file. */
+let tmpCounter = 0;
+
+/** Write via a temp file + rename so a crash never leaves a half-written hook file. Temp names are unique per call, so two installs in one process cannot trip over each other. */
 export function atomicWrite(file: string, content: string | Buffer, mode = 0o644): void {
   ensureDir(path.dirname(file));
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${++tmpCounter}.tmp`;
   fs.writeFileSync(tmp, content, { mode });
   try {
     fs.chmodSync(tmp, mode);

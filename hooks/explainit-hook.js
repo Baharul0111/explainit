@@ -128,40 +128,64 @@ function shellText(input) {
 }
 
 // ---- protected paths (mirror of the gate policy; applies even without a running window) ----------
-function editMentionsHooks(tool, input) {
+// Config files are denied only when the hook-related part would change. For Write we have the whole
+// new content; for Edit/MultiEdit we apply the replacement to the current file first. When we cannot
+// tell what the file would look like afterwards, we fall back to "does the edit mention hooks at all".
+const HOOK_WORDS = /hooks|explainit/i;
+const TOML_TRUST_WORDS = /hooks|explainit|trusted_hash|sha256:|enabled\s*=/i;
+function currentText(file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return ''; } }
+function editMentionsHooks(tool, input, words) {
   const parts = [];
   if (tool === 'MultiEdit' && Array.isArray(input.edits)) for (const e of input.edits) parts.push(str(e && e.old_string), str(e && e.new_string));
   else parts.push(str(input.old_string), str(input.new_string), str(input.content), str(input.command), str(input.patch));
-  return /hooks|explainit/i.test(parts.join('\n'));
+  return (words || HOOK_WORDS).test(parts.join('\n'));
+}
+/** The file content after the tool ran, or null when the tool's input shape is not one we can replay. */
+function proposedText(tool, input, file) {
+  if (tool === 'Write') return str(input.content);
+  const edits = tool === 'MultiEdit' ? (Array.isArray(input.edits) ? input.edits : null) : tool === 'Edit' ? [input] : null;
+  if (!edits) return null;
+  let text = currentText(file);
+  for (const e of edits) {
+    if (!e || typeof e.old_string !== 'string' || typeof e.new_string !== 'string') return null;
+    if (e.old_string === '') { text = e.new_string; continue; }
+    if (text.indexOf(e.old_string) < 0) return null;
+    text = e.replace_all ? text.split(e.old_string).join(e.new_string) : text.replace(e.old_string, function () { return e.new_string; });
+  }
+  return text;
 }
 function jsonHooksChange(tool, input, file) {
-  if (tool !== 'Write') return editMentionsHooks(tool, input);
-  let next, current;
-  try { next = JSON.parse(str(input.content)); } catch (e) { return true; }
-  try { current = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { current = {}; }
+  const next = proposedText(tool, input, file);
+  if (next === null) return editMentionsHooks(tool, input);
+  let parsed, current;
+  try { parsed = JSON.parse(next); } catch (e) { return true; }
+  try { current = JSON.parse(currentText(file)); } catch (e) { current = {}; }
   const pick = function (o) { return JSON.stringify((o && typeof o === 'object' && o.hooks) || null); };
-  return pick(next) !== pick(current);
+  return pick(parsed) !== pick(current);
 }
 function tomlHooksChange(tool, input, file) {
-  if (tool !== 'Write') return editMentionsHooks(tool, input);
-  const lines = function (t) { return t.split(/\r?\n/).filter(function (l) { return /hooks|explainit/i.test(l); }).join('\n'); };
-  let current = '';
-  try { current = fs.readFileSync(file, 'utf8'); } catch (e) { /* new file */ }
-  return lines(str(input.content)) !== lines(current);
+  const next = proposedText(tool, input, file);
+  if (next === null) return editMentionsHooks(tool, input, TOML_TRUST_WORDS);
+  const lines = function (t) { return t.split(/\r?\n/).filter(function (l) { return TOML_TRUST_WORDS.test(l); }).join('\n'); };
+  return lines(next) !== lines(currentText(file));
 }
 function protectedReason(opts, tool, input, target) {
   const userHome = os.homedir();
   const claudeSettings = [path.join(userHome, '.claude', 'settings.json'), path.join(userHome, '.claude', 'settings.local.json')];
-  const codexFiles = [path.join(userHome, '.codex', 'hooks.json'), path.join(userHome, '.codex', 'config.toml')];
+  // Codex keeps its files under CODEX_HOME when that is set (the installer follows it too).
+  const codexHome = (process.env.CODEX_HOME || '').trim() || path.join(userHome, '.codex');
+  const codexFiles = [path.join(codexHome, 'hooks.json'), path.join(codexHome, 'config.toml')];
   const refuse = function (what) {
     return 'ExplainIT refused this change: ' + what + ' If the person really wants this, they can change it by hand outside the assistant.';
   };
   if (isShell(tool)) {
     const cmd = shellText(input);
     if (!cmd) return null;
-    const cmdNorm = norm(cmd.replace(/\\/g, '/'));
-    const needles = [opts.home, '.claude/settings', '.codex/hooks.json', '.codex/config.toml', '.git/info/exclude', 'explainit-hook'];
-    for (const n of needles) if (cmdNorm.includes(norm(n.replace(/\\/g, '/')))) return refuse('the command references files that keep the ExplainIT checkpoint working (' + n + ').');
+    // Case-insensitive on every OS (stricter is fine here: a false deny only costs the person a retry by hand).
+    const cmdNorm = cmd.replace(/\\/g, '/').toLowerCase();
+    // opts.home is absolute; '/.explainit' also catches ~/.explainit and $HOME/.explainit spellings of the default home.
+    const needles = [opts.home, '/.explainit', '.claude/settings', '.codex/hooks.json', '.codex/config.toml', '.git/info/exclude', 'explainit-hook'];
+    for (const n of needles) if (cmdNorm.includes(n.replace(/\\/g, '/').toLowerCase())) return refuse('the command references files that keep the ExplainIT checkpoint working (' + n + ').');
     return null;
   }
   if (!target) return null;
@@ -174,9 +198,12 @@ function protectedReason(opts, tool, input, target) {
   // User-layer files are protected outright for whole-file writes; project-layer copies and edits only when hooks change.
   const userLayer = claudeSettings.concat(codexFiles).some(function (f) { return sameFile(f, target); });
   const isClaudeSettings = parent === '.claude' && (base === 'settings.json' || base === 'settings.local.json');
+  const isCodexHooks = base === 'hooks.json' && (parent === '.codex' || sameFile(codexFiles[0], target));
+  const isCodexConfig = base === 'config.toml' && (parent === '.codex' || sameFile(codexFiles[1], target));
   if (isClaudeSettings && ((userLayer && tool === 'Write') || jsonHooksChange(tool, input, target))) return refuse(base + ' holds the hooks that run the ExplainIT checkpoint.');
-  if (parent === '.codex' && base === 'hooks.json' && ((userLayer && tool === 'Write') || jsonHooksChange(tool, input, target))) return refuse('.codex/hooks.json holds the hooks that run the ExplainIT checkpoint.');
-  if (parent === '.codex' && base === 'config.toml' && ((userLayer && tool === 'Write') || tomlHooksChange(tool, input, target))) return refuse('.codex/config.toml records which hooks Codex trusts, including the ExplainIT checkpoint.');
+  // hooks.json is nothing but hooks, so any partial edit of it is a hooks change.
+  if (isCodexHooks && (userLayer || tool !== 'Write' || jsonHooksChange(tool, input, target))) return refuse('.codex/hooks.json holds the hooks that run the ExplainIT checkpoint.');
+  if (isCodexConfig && ((userLayer && tool === 'Write') || tomlHooksChange(tool, input, target))) return refuse('.codex/config.toml records which hooks Codex trusts, including the ExplainIT checkpoint.');
   return null;
 }
 

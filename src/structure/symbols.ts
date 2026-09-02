@@ -26,8 +26,12 @@ const BUILTIN_SYMBOL_LANGUAGES = new Set([
   'markdown',
 ]);
 const PLAUSIBILITY_TTL_MS = 60_000;
-/** After a full retry sequence found no provider for a language, single attempts only for this long. */
-const NO_PROVIDER_TTL_MS = 60_000;
+/**
+ * After a full retry sequence found no provider for a language, single attempts only for this long.
+ * Every call still asks once, so a provider that starts later is picked up immediately; the memory
+ * only stops the 5 s wait from repeating on every file of a language nobody outlines.
+ */
+const NO_PROVIDER_TTL_MS = 5 * 60_000;
 const PER_CALL_TIMEOUT_MS = 4000;
 
 export interface SymbolFetchResult {

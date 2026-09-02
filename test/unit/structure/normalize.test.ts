@@ -7,6 +7,7 @@ import {
   emptyFunctionMap,
   expandToFullLines,
   functionText,
+  hintBasename,
   isNonTrivialText,
   qualify,
   sliceLines,
@@ -144,6 +145,28 @@ suite('structure/pure/normalize', () => {
       assert.equal(qualify(undefined, 'f'), 'f');
       assert.equal(qualify('', 'f'), 'f');
       assert.equal(qualify('C', 'f'), 'C.f');
+    });
+    test('hintBasename keeps the extension for file uris and for POSIX and Windows paths on any host', () => {
+      assert.equal(hintBasename('file:///Users/me/src/app.py'), 'app.py');
+      assert.equal(hintBasename('file:///c%3A/repo/src/util.ts'), 'util.ts');
+      assert.equal(hintBasename('file:///C:/repo/src/util.ts?x=1#frag'), 'util.ts');
+      assert.equal(hintBasename('untitled:Untitled-1'), 'Untitled-1');
+      assert.equal(hintBasename('/Users/me/src/app.py'), 'app.py');
+      assert.equal(hintBasename('C:\\repo\\src\\Calculator.java'), 'Calculator.java');
+      assert.equal(hintBasename('\\\\server\\share\\legacy\\report.cob'), 'report.cob');
+      assert.equal(hintBasename('C:/repo/src/main.go'), 'main.go');
+      assert.equal(hintBasename('file:///tmp/my%20file%20(1).tsx'), 'my_file__1_.tsx');
+      assert.equal(hintBasename('weird name/with spaces.ts'), 'with_spaces.ts');
+      assert.equal(hintBasename('file:///x/%E2%82%AC.py'), '_.py');
+    });
+    test('hintBasename never returns an empty or dot-only name', () => {
+      assert.equal(hintBasename(''), 'proposed.txt');
+      assert.equal(hintBasename('   '), 'proposed.txt');
+      assert.equal(hintBasename('/'), 'proposed.txt');
+      assert.equal(hintBasename('file:///'), 'proposed.txt');
+      assert.equal(hintBasename('/a/..'), 'proposed.txt');
+      assert.equal(hintBasename('C:\\'), 'proposed.txt');
+      assert.equal(hintBasename(undefined as unknown as string, 'x.txt'), 'x.txt');
     });
     test('isNonTrivialText needs two non-blank lines and some length', () => {
       assert.equal(isNonTrivialText(''), false);

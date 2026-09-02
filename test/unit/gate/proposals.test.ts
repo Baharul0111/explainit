@@ -140,7 +140,8 @@ suite('gate/pure/proposals: buildPatchWrites', () => {
   test('no patch text -> invalid', () => {
     assert.equal(buildPatchWrites({ command: 'ls' }, io({})).ok, false);
   });
-  test('proposalSize sums utf-8 bytes of after content', () => {
-    assert.equal(proposalSize([{ kind: 'create', path: 'x', before: null, after: 'héllo' }, { kind: 'delete', path: 'y', before: 'z', after: null }]), 6);
+  test('proposalSize sums the larger side of every write in utf-8 bytes', () => {
+    assert.equal(proposalSize([{ kind: 'create', path: 'x', before: null, after: 'héllo' }, { kind: 'delete', path: 'y', before: 'zz', after: null }]), 8);
+    assert.equal(proposalSize([{ kind: 'modify', path: 'x', before: 'long before', after: 'a' }]), 11);
   });
 });

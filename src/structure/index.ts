@@ -9,17 +9,17 @@ import type { CoreDeps, Disposable, GenerationRouter, StructureEngine, Structure
 import type { FunctionMap, StructureSource } from '../core/types';
 import { aiSegmentsToRaw } from './pure/ai';
 import { heuristicFunctions } from './pure/heuristic';
-import { buildFunctionMap, emptyFunctionMap, isNonTrivialText, splitLines, type RawFunction } from './pure/normalize';
+import { buildFunctionMap, emptyFunctionMap, hintBasename, isNonTrivialText, splitLines, type RawFunction } from './pure/normalize';
 import { symbolsToRaw, type SymbolLike } from './pure/symbols';
 import { resolveWasmDir, TreeSitterService } from './pure/treeSitter';
-import { createProposedDocuments, proposedBasename } from './proposedDocs';
+import { createProposedDocuments } from './proposedDocs';
 import { createSymbolSource } from './symbols';
 
-export { expandToFullLines, sliceLines, functionText, splitLines, buildFunctionMap, emptyFunctionMap, textHashOf } from './pure/normalize';
+export { expandToFullLines, sliceLines, functionText, splitLines, buildFunctionMap, emptyFunctionMap, textHashOf, hintBasename } from './pure/normalize';
 export type { RawFunction } from './pure/normalize';
 export { heuristicFunctions } from './pure/heuristic';
 export { symbolsToRaw, looksLikeFunctionValue, containerLabel, SymbolKindNum } from './pure/symbols';
-export { GRAMMAR_BY_LANGUAGE, resolveWasmDir, TreeSitterService, extractFunctions } from './pure/treeSitter';
+export { GRAMMAR_BY_LANGUAGE, DEFAULT_MAX_TEXT_CHARS, resolveWasmDir, TreeSitterService, extractFunctions } from './pure/treeSitter';
 export { READINESS_DELAYS_MS, READINESS_CAP_MS, withReadinessRetry } from './pure/retry';
 export { aiSegmentsToRaw } from './pure/ai';
 export { PROPOSED_SCHEME } from './proposedDocs';
@@ -91,7 +91,14 @@ export function createStructureEngine(deps: StructureDeps): StructureEngine & { 
     // 2. tree-sitter. When the provider answered with symbols but none were functions, tree-sitter
     //    gets a chance (some providers only outline classes); an error-free empty parse confirms "no functions".
     if (treeSitter?.supports(languageId)) {
-      const parsed = await treeSitter.parseFunctions(text, languageId, opts?.token);
+      let parsed: Awaited<ReturnType<TreeSitterService['parseFunctions']>>;
+      try {
+        parsed = await treeSitter.parseFunctions(text, languageId, opts?.token);
+      } catch (e) {
+        // parseFunctions never rejects by contract; this guard keeps the heuristics reachable regardless.
+        log.warn(`tree-sitter failed for ${languageId}: ${(e as Error).message}`);
+        parsed = undefined;
+      }
       checkCancelled(opts);
       if (parsed) {
         if (parsed.functions.length) return finish(build('tree-sitter', parsed.functions));
@@ -111,7 +118,7 @@ export function createStructureEngine(deps: StructureDeps): StructureEngine & { 
       if (router) {
         const timeoutMs = Math.max(10, deps.settings.get('generationTimeoutSeconds')) * 1000;
         try {
-          const fileName = proposedBasename(fileUri);
+          const fileName = hintBasename(fileUri);
           const segments = await withTimeout(
             router.segmentWithAi({ fileName, languageId, text }, { token: opts.token, timeoutMs }),
             timeoutMs + 5000,

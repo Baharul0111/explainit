@@ -82,8 +82,20 @@ export function matchPrevious(functions: readonly FunctionRecord[], previous: re
   return out;
 }
 
+/**
+ * When the sidecar is missing or unreadable but a twin exists, its explained sections are recovered by
+ * name with an unknown (empty) content hash: they read as "changed", so the words are kept and marked
+ * out of date instead of being wiped, and a generating run re-explains them (cache hits cost nothing).
+ */
+export function sectionsFromParsed(parsed: ParsedTwin | undefined): TwinSection[] {
+  if (!parsed) return [];
+  return parsed.sections
+    .filter((s) => s.state === 'explained')
+    .map((s) => ({ index: s.index, functionId: '', name: s.name, contentHash: '', startLine: s.startLine, endLine: s.endLine, stale: true }));
+}
+
 export function planSections(map: FunctionMap, sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined, mode: GenerateMode): TwinPlan {
-  const matches = matchPrevious(map.functions, sidecar?.sections ?? []);
+  const matches = matchPrevious(map.functions, sidecar ? sidecar.sections : sectionsFromParsed(parsed));
   const entries: PlanEntry[] = map.functions.map((fn, i) => {
     const previous = matches.get(fn.id);
     const content = contentFor(parsed, previous);

@@ -25,3 +25,9 @@ tsconfig.json
 goal.md
 architecture.md
 *.vsix
+out-*/**
+.workflows/**
+*.log
+.mocharc.json
+.vscode-test-download.log
+dist/**/*.map

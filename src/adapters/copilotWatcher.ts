@@ -148,6 +148,12 @@ export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngi
     }
     if (!snap.map) snap.map = await deps.structure.getFunctionMapForText(snap.text, snap.languageId, doc.uri.toString());
     const afterMap = await deps.structure.getFunctionMap(docLike(doc));
+    if (!running || doc.isClosed) return;
+    if (doc.getText() !== current) {
+      // The text moved on while the maps were being built; look again once it settles.
+      scheduleReview(doc, DEBOUNCE_MS);
+      return;
+    }
     const changes = diffFunctionMaps(snap.map, snap.text, afterMap, current);
     const existing = reviews.get(key);
     existing?.cancel.cancel();
@@ -172,6 +178,8 @@ export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngi
     log.info(`copilot overlay: ${changes.length} changed function(s) in ${doc.uri.fsPath}`);
     armKeepTimer(key, doc);
     await explainAll(doc, fileReview);
+    // Give the person 30 s to read the finished explanations before the lenses clear.
+    if (reviews.get(key) === fileReview && !doc.isClosed) armKeepTimer(key, doc);
   }
 
   async function explainAll(doc: vscode.TextDocument, r: FileReview): Promise<void> {
@@ -215,7 +223,8 @@ export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngi
     if (!r) return;
     if (r.keepTimer) clearTimeout(r.keepTimer);
     r.keepTimer = setTimeout(() => {
-      // 30 s without further changes: the person kept the change. Move the snapshot and clear lenses.
+      // 30 s without further changes (and after the explanations arrived): the person kept the change.
+      // Move the snapshot and clear the lenses.
       if (!doc.isClosed) takeSnapshot(doc);
       clearReview(key);
     }, KEEP_MS);

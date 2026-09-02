@@ -130,6 +130,38 @@ suite('gate/server', () => {
     assert.equal(r.status, 413);
   });
 
+  test('413 for a chunked body (no content-length) that grows past 8 MB, answered before the socket drops', async function () {
+    this.timeout(20_000);
+    const r = await new Promise<Resp>((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port, method: 'POST', path: '/v1/hook', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'transfer-encoding': 'chunked' } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+        },
+      );
+      // The server may reset the connection once it has answered; that is fine as long as the answer arrived.
+      req.on('error', (e) => reject(e));
+      req.write('{"agent":"claude","event":"PreToolUse","payload":{"tool_name":"Write","tool_input":{"content":"');
+      const piece = Buffer.alloc(256 * 1024, 0x78);
+      let sent = 0;
+      const pump = (): void => {
+        while (sent <= BODY_LIMIT + piece.length) {
+          sent += piece.length;
+          if (!req.write(piece)) {
+            req.once('drain', pump);
+            return;
+          }
+        }
+        req.end('"}}');
+      };
+      pump();
+    });
+    assert.equal(r.status, 413);
+    assert.match(r.body.error, /larger than 8 MB/);
+  });
+
   test('500 with a message when handling throws unexpectedly', async () => {
     const r = await request(port, 'POST', '/v1/hook', envelope('Boom'), token);
     assert.equal(r.status, 500);

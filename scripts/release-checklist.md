@@ -25,9 +25,14 @@ npm run package            # -> explainit-<version>.vsix in the repo root
 npm run test:install       # fresh VS Code installs the VSIX and drives it end to end (Linux: xvfb-run -a npm run test:install)
 ```
 
-Open the `.vsix` once with `unzip -l explainit-<version>.vsix` and check it contains `extension/dist/extension.js`,
-`extension/dist/wasm/`, `extension/hooks/explainit-hook.js`, `extension/docs/runbooks/` and nothing from
-`src/`, `test/`, `.env` or `node_modules/`.
+Then run `node scripts/check-vsix.js` (CI and the release workflow run it too). It reads the package
+and fails if anything is missing (`extension/dist/extension.js`, `extension/dist/wasm/`,
+`extension/hooks/explainit-hook.js`, `extension/docs/runbooks/`) or if anything that must not ship is
+in it: `src/`, `test/`, `.env`, `node_modules/`, scratch build folders (`out-*/`), `.workflows/`, `*.log`,
+or simply too many files (a healthy package is a few dozen files, not thousands; `vsce` prints the
+tree while packaging). If stray folders show up, delete them (they are git-ignored) or add them to
+`.vscodeignore`, then package again from a clean checkout (`git clean -ndx` shows what a fresh clone
+would not have). `unzip -l explainit-<version>.vsix` shows the full list if you want to look yourself.
 
 ## 2. Dry run in the release workflow (optional but recommended)
 

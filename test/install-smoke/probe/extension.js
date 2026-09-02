@@ -63,6 +63,32 @@ async function waitFor(what, probe, timeoutMs, everyMs) {
   }
 }
 
+/**
+ * Copy of twinSectionStatus() from ../pure/smoke.ts (the probe has no build step, so it cannot import
+ * the TypeScript helper). Keep the two in step. Complete = a real "What it does:" sentence (not the
+ * "(explaining...)" / "(not explained yet ...)" placeholder) and 2..5 "How it works" steps.
+ */
+function twinSectionStatus(text, index, name) {
+  if (text === undefined || text === '') return { state: 'missing', detail: 'the twin file does not exist yet', steps: 0 };
+  const lines = text.split(/\r?\n/);
+  const header = `${index}. ${name}`;
+  const start = lines.findIndex((l) => l.trim() === header);
+  if (start < 0) return { state: 'missing', detail: `no "${header}" section (first lines: ${lines.slice(0, 3).join(' | ')})`, steps: 0 };
+  const section = [];
+  for (let i = start + 1; i < lines.length && lines[i].trim() !== '' && !/^\d+\. /.test(lines[i]); i++) section.push(lines[i]);
+  const what = section.find((l) => l.startsWith('What it does: '));
+  if (!what) return { state: 'incomplete', detail: `the "${header}" section has no "What it does:" line`, steps: 0 };
+  const summary = what.slice('What it does: '.length).trim();
+  if (summary.startsWith('(explaining')) return { state: 'pending', detail: 'the section still says "(explaining...)": the assistant has not answered yet', steps: 0 };
+  if (summary.startsWith('(not explained yet')) return { state: 'unavailable', detail: 'the section says "(not explained yet ...)": no assistant was used', steps: 0 };
+  const howAt = section.indexOf('How it works:');
+  const steps = howAt < 0 ? 0 : section.slice(howAt + 1).filter((l) => l.startsWith('- ')).length;
+  if (howAt < 0 || steps < 2) return { state: 'incomplete', detail: `the section has ${steps} "How it works" step(s); at least 2 expected`, summary, steps };
+  if (steps > 5) return { state: 'incomplete', detail: `the section has ${steps} "How it works" steps; at most 5 expected`, summary, steps };
+  if (!/[.!?]$/.test(summary)) return { state: 'incomplete', detail: `the summary is not a sentence: "${summary}"`, summary, steps };
+  return { state: 'complete', detail: `${what} (${steps} steps)`, summary, steps };
+}
+
 function readIfExists(file) {
   try {
     return fs.readFileSync(file, 'utf8');
@@ -110,30 +136,37 @@ async function runProbe() {
       commandError = String((e && e.message) || e);
     });
 
-  // 7. The twin file appears beside the source with the first function explained by the fake assistant.
+  // 7. The twin file appears beside the source with the first function fully explained by the fake
+  //    assistant (a placeholder such as "(explaining...)" does not count). "(not explained yet)" means
+  //    no assistant was used; give the engine a short grace period, then stop waiting.
   const twinPath = path.join(workspaceDir, 'src', 'app_explain.txt');
-  let twinText = '';
+  const TWIN_STEP = 'Twin app_explain.txt is written beside app.py with "1. load_config" explained by the assistant';
+  let status = { state: 'missing', detail: 'not checked yet', steps: 0 };
+  let unavailableSince;
   try {
     const got = await waitFor(
-      'app_explain.txt to contain "1. load_config" with a real explanation',
+      'app_explain.txt to contain a complete "1. load_config" section',
       () => {
-        twinText = readIfExists(twinPath) || '';
-        if (commandError) throw new Error(commandError);
-        return twinText.includes('1. load_config') && !twinText.includes('(not explained yet') ? twinText : undefined;
+        if (commandError) throw new Error(`the openTwin command failed: ${commandError}`);
+        status = twinSectionStatus(readIfExists(twinPath), 1, 'load_config');
+        if (status.state === 'unavailable') {
+          unavailableSince = unavailableSince || Date.now();
+          if (Date.now() - unavailableSince > 15000) throw new Error(status.detail);
+        } else unavailableSince = undefined;
+        return status.state === 'complete' ? status : undefined;
       },
       120000,
       500,
     );
-    record('Twin app_explain.txt is written beside app.py with "1. load_config" explained', true, firstSectionSummary(got.value), got.ms);
+    record(TWIN_STEP, true, got.value.detail, got.ms);
   } catch (e) {
-    const why = commandError
-      ? `the openTwin command failed: ${commandError}`
-      : !twinText
-        ? `no twin file at ${twinPath}. ${e.message}`
-        : twinText.includes('(not explained yet')
-          ? 'the twin exists but says "not explained yet": the fake assistant was not used. Check explainit.assistant.claudeCliPath in the temp settings.json and that node is on PATH.'
-          : `the twin exists but has no "1. load_config" section. First lines: ${twinText.split(/\r?\n/).slice(0, 4).join(' | ')}`;
-    record('Twin app_explain.txt is written beside app.py with "1. load_config" explained', false, why);
+    const hint =
+      status.state === 'unavailable'
+        ? ' Check explainit.assistant.claudeCliPath in the temp settings.json and that node is on PATH.'
+        : status.state === 'pending'
+          ? ' The fake assistant did not answer in time; run with EXPLAINIT_SMOKE_VERBOSE=1 and look at the ExplainIT log.'
+          : '';
+    record(TWIN_STEP, false, `${status.detail}. ${e.message}${hint}`);
   }
   await Promise.race([commandDone, sleep(5000)]);
 
@@ -177,12 +210,6 @@ async function quit() {
   }
   await sleep(300);
   await vscode.commands.executeCommand('workbench.action.quit');
-}
-
-function firstSectionSummary(text) {
-  const lines = text.split(/\r?\n/);
-  const i = lines.findIndex((l) => l.startsWith('1. load_config'));
-  return i >= 0 ? lines.slice(i, i + 2).join(' | ') : '';
 }
 
 function activate() {
