@@ -6,7 +6,7 @@
 // -o file; with --json, JSONL events go to stdout. See common.js for FAKE_CLI_MODE.
 'use strict';
 const fs = require('node:fs');
-const { parseArgv, readPrompt, logPrompt, replyFor, shouldFail, writeLines } = require('./common');
+const { parseArgv, readPrompt, logPrompt, replyFor, shouldFail, signedOut, CODEX_SIGNED_OUT, writeLines } = require('./common');
 
 const VALUE_FLAGS = ['-C', '--cd', '-o', '--output-last-message', '--sandbox', '-s', '-m', '--model', '-c', '--config', '-p', '--profile', '--output-schema', '--color', '--add-dir', '-i', '--image', '--enable', '--disable'];
 
@@ -25,6 +25,15 @@ async function main() {
   logPrompt('codex', argv, prompt);
   if (shouldFail()) {
     process.stderr.write('fake codex: failure requested by FAKE_CLI_MODE=fail\n');
+    return 1;
+  }
+  if (signedOut()) {
+    // The real CLI never writes the -o file here: the notice goes to stderr (and, with --json, to an
+    // error event on stdout) and the exit code is 1.
+    if (flags.has('--json')) {
+      await writeLines([JSON.stringify({ type: 'thread.started', thread_id: 'fake-thread' }), JSON.stringify({ type: 'error', message: CODEX_SIGNED_OUT })], 3);
+    }
+    process.stderr.write('ERROR: ' + CODEX_SIGNED_OUT + '\n');
     return 1;
   }
   const text = await replyFor(prompt);

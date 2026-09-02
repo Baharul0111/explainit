@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { CONSENT_SENTENCE, FORBIDDEN_WORDS, MESSAGES, msg, placeholdersOf, describeError, type MessageKey } from '../../../src/ux/pure/messages';
+import { CONSENT_SENTENCE, FORBIDDEN_WORDS, MESSAGES, msg, placeholdersOf, describeError, withSignInHint, type MessageKey } from '../../../src/ux/pure/messages';
 
 suite('ux/pure/messages', () => {
   const keys = Object.keys(MESSAGES) as MessageKey[];
@@ -74,6 +74,24 @@ suite('ux/pure/messages', () => {
       assert.equal(placeholdersOf(k).length, new Set(MESSAGES[k].match(/\{(\w+)\}/g) ?? []).size);
     }
     assert.deepEqual(placeholdersOf('restoreFailed').sort(), ['detail', 'file']);
+  });
+
+  test('codex trust step names the exact terminal steps and says the VS Code extension shares the record', () => {
+    assert.match(MESSAGES.codexTrustStep, /open codex in a terminal once/i);
+    assert.match(MESSAGES.codexTrustStep, /choose Trust/);
+    assert.match(MESSAGES.codexTrustStep, /\/hooks/);
+    assert.match(MESSAGES.codexTrustStep, /VS Code extension uses the same trust record/);
+  });
+
+  test('withSignInHint appends the "codex login" hint once for revoked-sign-in messages and leaves others alone', () => {
+    const a = withSignInHint('Codex could not answer: refresh token was revoked');
+    assert.ok(a.endsWith(MESSAGES.codexSignInHint), a);
+    assert.ok(a.includes('codex login'));
+    assert.equal(withSignInHint(a), a, 'never appended twice');
+    assert.ok(withSignInHint('Please log out and sign in again.').includes('codex login'));
+    assert.ok(withSignInHint('please logout and sign in again').includes('codex login'));
+    assert.equal(withSignInHint('disk full.'), 'disk full.');
+    assert.equal(withSignInHint(''), '');
   });
 
   test('describeError makes a sentence out of anything', () => {

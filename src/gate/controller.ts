@@ -141,11 +141,15 @@ export class GateController {
     } catch {
       /* adapters not ready */
     }
+    // Codex keeps hooks.json / config.toml under CODEX_HOME when the person set it (the hook script
+    // and the installer follow it too); the policy falls back to <userHome>/.codex.
+    const codexHome = (process.env.CODEX_HOME ?? '').trim();
     return {
       explainitHome: explainitHome(),
       userHome: this.deps.userHome ?? os.homedir(),
       folders: this.deps.workspaceFolders(),
       extraProtected: hook ? [hook] : [],
+      codexHome: codexHome || undefined,
     };
   }
 
@@ -213,10 +217,15 @@ export class GateController {
     if (twinWrites.length === writes.length) return allow();
     const codeWrites = writes.filter((w) => !twinWrites.includes(w));
 
-    // Protected paths: deny first, .git asks after a warning.
+    // Protected paths: deny first, .git asks after a warning. Every write carries the FULL before /
+    // after content (partial edits were replayed onto the current file above), so the hooks
+    // comparison sees exactly what would land on disk.
     const warnings: string[] = [];
     for (const w of codeWrites) {
-      const pol = checkWritePolicy(w, ctx);
+      // Edit / MultiEdit / an apply_patch update of an existing file are partial edits; hooks.json
+      // is nothing but hooks, so any partial edit of it counts as a hooks change.
+      const partial = v.category === 'edit' || v.category === 'multiedit' || (v.category === 'patch' && w.before !== null);
+      const pol = checkWritePolicy(w, ctx, { partial });
       if (pol.action === 'deny') return deny(pol.reason);
       if (pol.action === 'ask') warnings.push(pol.warning);
     }
@@ -238,8 +247,10 @@ export class GateController {
 
   private twinLooksValid(text: string): boolean {
     try {
-      const parsed = this.deps.twin.parseTwin(text);
-      return Array.isArray(parsed.sections) && parsed.sections.length > 0;
+      const parsed = this.deps.twin.parseTwin(text) as { sections: unknown[]; noFunctions?: boolean };
+      if (!Array.isArray(parsed.sections)) return false;
+      // A twin for a file without functions carries the CONTRACTS "no functions" line instead of sections.
+      return parsed.sections.length > 0 || parsed.noFunctions === true;
     } catch {
       return false;
     }

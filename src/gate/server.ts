@@ -14,6 +14,10 @@ import { IngressValidationError } from './controller';
 import { purgeDeadSessions, removeSessionFile, writeSessionFile } from './pure/sessionFile';
 
 export const BODY_LIMIT = 8 * 1024 * 1024;
+/** How long the 413 path keeps draining an over-long body before it answers anyway. */
+export const DRAIN_GRACE_MS = 2_000;
+/** Backstop for a client that keeps the socket open after the 413 was flushed. */
+const CLOSE_BACKSTOP_MS = 5_000;
 export const LONG_POLL_MS = 25_000;
 /** How long POST /v1/hook waits for a fast-path answer before switching to 202 + long-poll. */
 export const FAST_PATH_MS = 1_500;
@@ -64,8 +68,10 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<{ ok: true;
       size += c.length;
       if (size > limit) {
         done = true;
-        // Stop buffering; the caller answers 413 first and then drops the connection.
-        req.pause();
+        // Stop buffering (later chunks are discarded above); the caller drains the rest of the body
+        // and answers 413 before the connection goes away. Do NOT pause: a paused request never
+        // ends, so we could never tell when it is safe to close the socket.
+        chunks.length = 0;
         resolve({ ok: false, status: 413, error: `The request body is larger than ${limit / 1024 / 1024} MB.`, drop: true });
         return;
       }
@@ -82,6 +88,41 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<{ ok: true;
       resolve({ ok: false, status: 400, error: `The request body could not be read: ${e.message}` });
     });
   });
+}
+
+/**
+ * Answers a body that outgrew the cap mid-stream, and makes sure the answer is what the client
+ * actually sees. The client is normally still writing, and a socket that is destroyed while bytes
+ * are still arriving is reset by the OS — on Windows that reset throws away the response the client
+ * had not read yet, so the hook sees `ECONNRESET` instead of the 413. So: keep reading and
+ * discarding the rest of the body (`req.resume()`), and only once it has ended (or the grace window
+ * expired) write the response with `Connection: close` and end it. Node then flushes the answer and
+ * closes the socket afterwards; the backstop timer only covers a client that keeps it open.
+ */
+function answerTooLarge(req: http.IncomingMessage, res: http.ServerResponse, status: number, error: string): void {
+  const socket = req.socket;
+  req.resume();
+  // The client may vanish while we drain; that must never become an uncaught exception.
+  res.on('error', () => undefined);
+  let answered = false;
+  const answer = (): void => {
+    if (answered) return;
+    answered = true;
+    clearTimeout(grace);
+    if (res.writableEnded || res.destroyed || socket?.destroyed) return;
+    const text = JSON.stringify({ error });
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(text), Connection: 'close' });
+    res.end(text, () => {
+      const backstop = setTimeout(() => socket?.destroy(), CLOSE_BACKSTOP_MS);
+      backstop.unref?.();
+      socket?.once('close', () => clearTimeout(backstop));
+    });
+  };
+  const grace = setTimeout(answer, DRAIN_GRACE_MS);
+  grace.unref?.();
+  req.once('end', answer);
+  req.once('close', answer);
+  req.once('error', answer);
 }
 
 export class GateHttpServer {
@@ -213,8 +254,8 @@ export class GateHttpServer {
   private async onHook(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await readBody(req, BODY_LIMIT);
     if (!body.ok) {
-      if (body.drop) res.once('finish', () => req.destroy());
-      send(res, body.status, { error: body.error });
+      if (body.drop) answerTooLarge(req, res, body.status, body.error);
+      else send(res, body.status, { error: body.error });
       return;
     }
     let parsed: unknown;

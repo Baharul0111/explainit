@@ -196,7 +196,7 @@ export interface TwinEngine {
   /** Regenerate exactly one section (by 1-based index) on request. */
   regenerateSection(twinPath: string, sectionIndex: number): Promise<void>;
   /** Parse an existing twin into sections (pure). */
-  parseTwin(text: string): { sections: { index: number; name: string; startLine: number; endLine: number; stale: boolean }[] };
+  parseTwin(text: string): { sections: { index: number; name: string; startLine: number; endLine: number; stale: boolean }[]; noFunctions?: boolean };
   /** Ensure `*_explain.txt` is in .git/info/exclude of the repo containing `folder`. */
   ensureGitExclude(folder: string): Promise<'added' | 'present' | 'no-git' | 'error'>;
   /** Offer (never force) a shared .gitignore entry. */

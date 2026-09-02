@@ -14,7 +14,7 @@ import type { Logger } from '../core/log';
 import { applyAllFixes, runDoctorChecks, type DoctorDeps, type InstructionFileProbe } from './pure/doctorChecks';
 import { probeHealthWithRetry } from './pure/health';
 import { MESSAGES, msg, describeError } from './pure/messages';
-import { HOOK_OUTPUT_CAP, interpretHookOutput, parseSessionFile, syntheticWritePayload, type HookOutcome } from './pure/parsers';
+import { HOOK_OUTPUT_CAP, codexPathsFor, interpretHookOutput, parseSessionFile, syntheticWritePayload, type HookOutcome } from './pure/parsers';
 import { renderDoctorMarkdown } from './pure/render';
 import type { Prompter } from './prompts';
 import type { UxDeps } from './deps';
@@ -34,7 +34,11 @@ export const DOCTOR_DOC_NAME = 'ExplainIT Doctor report.md';
 const FIX_ALL = 'Fix all';
 const OPEN_REPORT = 'Open report';
 
-/** Spawn the hook script with a synthetic twin-file Write for `folder`; the gate auto-allows twin writes, so no human is needed. */
+/**
+ * Spawn the hook script with a synthetic twin-file Write for `folder`; the gate answers twin writes by itself,
+ * so no human is needed. The script always runs as `--agent claude` with a Claude-shaped payload: Claude hook
+ * semantics print every answer, whereas under `--agent codex` a bare allow prints nothing (see parsers.ts).
+ */
 export async function hookLiveTest(ux: UxDeps, folder: string, logger: Logger, timeoutMs = 7000): Promise<HookOutcome> {
   let script = '';
   try {
@@ -58,7 +62,8 @@ export async function hookLiveTest(ux: UxDeps, folder: string, logger: Logger, t
     let child: ReturnType<typeof spawn>;
     try {
       // Argument array only; no shell. process.execPath is VS Code's Electron in the extension host,
-      // ELECTRON_RUN_AS_NODE makes it behave as plain Node (harmless under real Node).
+      // ELECTRON_RUN_AS_NODE makes it behave as plain Node (harmless under real Node). `--agent claude` on
+      // purpose: the payload is Claude-shaped and Claude semantics print allow/deny/ask alike.
       child = spawn(process.execPath, [script, '--agent', 'claude', '--watchdog', String(watchdog)], {
         cwd: folder,
         env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', EXPLAINIT_HOME: explainitHome() },
@@ -115,11 +120,6 @@ async function readSessionFile(pid: number): Promise<GateSessionInfo | undefined
   return parseSessionFile(await readText(path.join(HOME_LAYOUT.sessions(), `${pid}.json`)));
 }
 
-function codexHome(): string {
-  const o = process.env.CODEX_HOME;
-  return o && o.trim() ? path.resolve(o) : path.join(os.homedir(), '.codex');
-}
-
 async function freeBytesAt(p: string): Promise<number> {
   let cur = p;
   for (;;) {
@@ -167,8 +167,10 @@ export function buildDoctorDeps(g: DoctorGlueDeps): DoctorDeps {
   // Memoise detection so the several checks that need it share one (bounded) call.
   let detectP: ReturnType<typeof ux.adapters.detect> | undefined;
   let statesP: ReturnType<typeof ux.adapters.states> | undefined;
+  let integrityP: ReturnType<typeof ux.adapters.verifyIntegrity> | undefined;
   const detect = () => (detectP ??= ux.adapters.detect());
   const states = () => (statesP ??= ux.adapters.states());
+  const verifyIntegrity = () => (integrityP ??= ux.adapters.verifyIntegrity());
 
   return {
     consentGranted: () => ux.consent.granted(),
@@ -178,9 +180,10 @@ export function buildDoctorDeps(g: DoctorGlueDeps): DoctorDeps {
     gatePaused: () => ux.gate.paused,
     healthProbe: (port) => probeHealthWithRetry(port, 2000),
     readSessionFile,
-    verifyIntegrity: () => ux.adapters.verifyIntegrity(),
+    verifyIntegrity,
     adapterStates: states,
-    codexConfigText: () => readText(path.join(codexHome(), 'config.toml')),
+    // Codex honours CODEX_HOME; show the same files the adapters read (never a hard-coded ~/.codex).
+    codexPaths: codexPathsFor(process.env, os.homedir(), explainitHome()),
     hookLiveTest: (folder) => hookLiveTest(ux, folder, g.logger),
     folders,
     // Match each kit to its folder by identity (safetyFor returns the same kit object per folder).

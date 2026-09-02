@@ -16,7 +16,7 @@ Everything runs on your own machine. The explanations are written by the assista
 | Assistant | How ExplainIT reaches it | What you get | Honest note |
 |---|---|---|---|
 | **Claude Code** (terminal tool *and* the Claude Code VS Code extension) | A `PreToolUse` hook on `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`, installed in your user-level `~/.claude/settings.json`. The extension bundles the same engine and reads the same settings, so edits made from inside the editor are gated identically. | **Pre-write block.** The change is held before disk, reviewed per function, landed on Accept. Reject sends your reason back. Deny holds even in bypass-permissions mode. | Restart a running Claude Code session after connecting; hooks load at start. |
-| **Codex** (terminal tool *and* the Codex VS Code extension) | `PreToolUse` command hooks matching `apply_patch`, `Edit`, `Write` and `Bash`, installed at the **user layer** (`~/.codex/hooks.json`), where a repo-editing agent cannot silently drop them. The extension runs the same binary with the same config. | **Pre-write block**, same review as Claude Code. | **Trust step:** the first time Codex starts after the hook is installed it asks whether to trust the ExplainIT hook. Choose *trust*. The record is shared by the terminal tool and the extension; the Doctor checks it for both. |
+| **Codex** (terminal tool *and* the Codex VS Code extension) | `PreToolUse` command hooks matching `apply_patch`, `Edit`, `Write` and `Bash`, installed at the **user layer** (`~/.codex/hooks.json`, or `$CODEX_HOME/hooks.json` when `CODEX_HOME` is set), where a repo-editing agent cannot silently drop them. The extension runs the same binary with the same config. | **Pre-write block**, same review as Claude Code. | **Trust step:** Codex only runs hooks you have trusted. Open `codex` once in a terminal; when it shows the ExplainIT hook choose **Trust** (or type `/hooks`). The record lives in `config.toml` and is shared by the terminal tool and the extension, so once is enough; the Doctor checks it for both. |
 | **GitHub Copilot** (agent mode in VS Code) | Copilot offers no way for another extension to stop its writes. ExplainIT watches saved changes, adds a per-function plain-English note to Copilot's own Keep/Undo review, and steers Copilot through `.github/copilot-instructions.md` to work one function at a time. | **Review after landing**, using Copilot's native Keep/Undo. A restore point is still saved for every change. | This path *reviews* changes rather than blocking them. The interface says so plainly. |
 
 Whatever the path, every change ExplainIT sees is written to a tamper-evident local journal, a restore point is saved first, and you can restore any file with one click.
@@ -33,9 +33,10 @@ Whatever the path, every change ExplainIT sees is written to a tamper-evident lo
 1. Install ExplainIT from the Marketplace (or Open VSX for VSCodium and Cursor).
 2. Have at least one assistant installed and signed in: [Claude Code](https://code.claude.com/docs/en/overview) (terminal tool or the VS Code extension), [Codex](https://developers.openai.com/codex) (terminal tool or the VS Code extension), or [GitHub Copilot](https://code.visualstudio.com/docs/copilot/setup).
 3. On first use ExplainIT asks your **permission** to use those assistants. Choose **Allow**. (Run **ExplainIT: Set up assistants** at any time to see this screen again.)
-4. ExplainIT **detects** what you have — Copilot in VS Code, Claude Code, Codex, including the VS Code extensions and the binaries they bundle — and offers a **one-click Connect** for each. Connecting installs the checkpoint hook and tells you the remaining steps (restart the assistant; for Codex, choose *trust* once).
-5. If nothing is found you get the three install links and a **Check again** button.
-6. Open any code file. The twin opens beside it. Run **ExplainIT: Doctor** whenever you want proof that everything is installed, armed and healthy.
+4. ExplainIT **detects** what you have — Copilot in VS Code, Claude Code, Codex, including the VS Code extensions and the binaries they bundle — and offers a **one-click Connect** for each. Connecting installs the checkpoint hook and tells you the remaining steps: restart the assistant, and for Codex do the **trust step** once.
+5. **Codex trust step.** Codex only runs hooks you have trusted. Open `codex` once in a terminal; when it shows the ExplainIT hook, choose **Trust** (or type `/hooks` and trust it there). The Codex VS Code extension shares that trust record, so you do this once, not per window. Until then Codex changes are not stopped for review, and the Doctor says so ("Codex trusts the ExplainIT hook").
+6. If nothing is found you get the three install links and a **Check again** button.
+7. Open any code file. The twin opens beside it. Run **ExplainIT: Doctor** whenever you want proof that everything is installed, armed and healthy.
 
 ## The twin format
 
@@ -127,12 +128,16 @@ Five short runbooks cover the most likely problems, each with symptoms, cause an
 4. [ExplainIT is not responding](docs/runbooks/4-explainit-not-responding.md) — the fallback within two minutes explained, how to recover
 5. [Restore a file, or the journal fails to verify](docs/runbooks/5-restore-and-journal.md)
 
+**Codex sign-in.** If the Doctor or an explanation reports `refresh token was revoked` or `Please log out and sign in again`, Codex's sign-in has expired. Run `codex login` in a terminal (the Codex VS Code extension uses the same sign-in), then try again. ExplainIT adds this hint to the message whenever Codex answers that way.
+
+**Codex trust.** If the Doctor's "Codex trusts the ExplainIT hook" check is a problem, its text is the adapter's own verdict: not trusted yet, changed since it was trusted, disabled, or "Trust unknown — run the Doctor after starting codex once". None of these can be fixed by **Fix all**: open `codex` once in a terminal and choose **Trust** (or type `/hooks`), then run the Doctor again. If you set `CODEX_HOME`, ExplainIT reads and shows that location instead of `~/.codex`.
+
 The status bar shows `$(shield) ExplainIT` while the checkpoint is alive, turns red with **not responding** if no heartbeat arrives for 15 seconds, and shows **ExplainIT paused** while the kill switch is on. Every empty, loading and error state has a plain-English message that says what happened and what to do next.
 
 ## Privacy and security
 
 - **Loopback only.** The checkpoint listens on `127.0.0.1` on a random port per window, with a random per-session bearer token that is never logged. Hook payloads are schema-validated, paths are canonicalised (symlinks resolved) and confined to your open folders, and request size is capped.
-- **Protected paths.** Assistants cannot switch the checkpoint off: writes to `~/.explainit/**` (hook scripts, wrappers, sessions, state, journal, restore points), to the hook entries in `~/.claude/settings*.json` and `~/.codex/hooks.json` / `config.toml`, and to `.git/info/exclude` are refused outright with a reason. Writes elsewhere under `.git/` are handed to the assistant's own prompt with a warning.
+- **Protected paths.** Assistants cannot switch the checkpoint off: writes to `~/.explainit/**` (hook scripts, wrappers, sessions, state, journal, restore points), to the hook entries in `~/.claude/settings*.json` and `~/.codex/hooks.json` / `config.toml` (or their `$CODEX_HOME` equivalents), and to `.git/info/exclude` are refused outright with a reason. Writes elsewhere under `.git/` are handed to the assistant's own prompt with a warning.
 - **Integrity.** The hook script, wrappers and config entries are hashed and verified every session and by the Doctor; tampering is re-armed automatically.
 - **Prompt-injection defence.** Code being explained is fenced as untrusted data with a fixed never-follow-instructions rule; twin output is plain text, schema-validated, never executed, and never influences a gate decision.
 - **Journal and restore.** Append-only, hash-chained journal per workspace; a restore point before every accepted write; rotation caps; a checkpoint→restore round-trip self-test in the Doctor.
@@ -144,7 +149,7 @@ The status bar shows `$(shield) ExplainIT` while the checkpoint is alive, turns 
 - **Copilot is review-after-landing**, not a pre-write block: Copilot exposes no gating API. If that changes, ExplainIT will use it.
 - The checkpoint gates the assistants' **file-edit tools**. Shell commands that write files are refused by default (`explainit.checkpoint.shellWrites`), which steers the assistant back to its edit tool; choose `ignore` and such writes are not inspected.
 - Hooks apply to **new** assistant sessions; restart a session after connecting.
-- Codex requires a **one-time trust** of the hook; until then Codex changes are not stopped. The Doctor shows this.
+- Codex requires a **one-time trust** of the hook (open `codex` in a terminal, choose **Trust**, or type `/hooks`); until then Codex changes are not stopped. The Doctor shows this, and cannot do it for you.
 - Assistants change their hook formats over time. ExplainIT pins tested versions in its conformance suite and ships fixes through the Marketplace pre-release channel.
 - Explanations come from your assistant's model and can be wrong; the twin says when a section is out of date, but it is a companion to the code, not a replacement for reading it.
 - Twins are real files. They are excluded from git locally; other sync tools (Dropbox, cloud drives) will see them.

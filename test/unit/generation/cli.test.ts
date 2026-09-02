@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { findExtensionBinary, findOnPath, parseSettingValue, platformDirMatches, probeVersion, resolveCli, runCli, withWindowsShim, type CliSpec } from '../../../src/generation/channels/cli';
+import { codexAuthFile, codexHomeDir, codexSignIn, findExtensionBinary, findOnPath, parseSettingValue, platformDirMatches, probeVersion, resolveCli, runCli, withWindowsShim, type CliSpec } from '../../../src/generation/channels/cli';
 import { ChannelError } from '../../../src/generation/channels/types';
 import { CancelSource } from '../../../src/core/cancel';
 import { FAKE_CLAUDE, FAKE_CODEX, rmDir, tmpDir } from './helpers';
@@ -132,6 +132,34 @@ suite('generation/channels/cli', () => {
       });
       assert.equal(spec.source, 'extension');
       assert.equal(spec.path, files.claude);
+    });
+
+    test('codex home: CODEX_HOME wins (trimmed, resolved), else <home>/.codex; auth.json lives there', () => {
+      const custom = path.join(dir, 'codex-elsewhere');
+      assert.equal(codexHomeDir({ env: { CODEX_HOME: `  ${custom}  ` }, homeDir: dir }), path.resolve(custom));
+      assert.equal(codexHomeDir({ env: { CODEX_HOME: '   ' }, homeDir: dir }), path.join(dir, '.codex'));
+      assert.equal(codexHomeDir({ env: {}, homeDir: dir }), path.join(dir, '.codex'));
+      assert.equal(codexAuthFile({ env: { CODEX_HOME: custom } }), path.join(custom, 'auth.json'));
+      assert.equal(codexAuthFile({ env: {}, homeDir: dir }), path.join(dir, '.codex', 'auth.json'));
+    });
+
+    test('codexSignIn: auth.json under the codex home, or an API key in the environment, else not signed in', () => {
+      const custom = path.join(dir, 'codex-home');
+      const none = codexSignIn({ env: { CODEX_HOME: custom }, homeDir: dir });
+      assert.equal(none.signedIn, false);
+      assert.equal(none.authFile, path.join(custom, 'auth.json'));
+      assert.match(none.detail, /no sign-in file/);
+      fs.mkdirSync(custom, { recursive: true });
+      fs.writeFileSync(path.join(custom, 'auth.json'), '{}');
+      assert.equal(codexSignIn({ env: { CODEX_HOME: custom }, homeDir: dir }).signedIn, true);
+      // A directory named auth.json is not a sign-in file.
+      const bad = path.join(dir, 'codex-bad');
+      fs.mkdirSync(path.join(bad, 'auth.json'), { recursive: true });
+      assert.equal(codexSignIn({ env: { CODEX_HOME: bad }, homeDir: dir }).signedIn, false);
+      const key = codexSignIn({ env: { CODEX_HOME: bad, CODEX_API_KEY: 'k' }, homeDir: dir });
+      assert.equal(key.signedIn, true);
+      assert.match(key.detail, /CODEX_API_KEY/);
+      assert.equal(codexSignIn({ env: { CODEX_HOME: bad, OPENAI_API_KEY: '   ' }, homeDir: dir }).signedIn, false);
     });
 
     test('nothing found -> source none with a plain-English next step', () => {

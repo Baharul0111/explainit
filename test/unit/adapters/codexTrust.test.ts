@@ -1,5 +1,5 @@
 import * as assert from 'node:assert';
-import { codexHookHash, codexHookKey, lookupTrust, parseHookStates, splitTomlKey } from '../../../src/adapters/pure/codexTrust';
+import { codexHookHash, codexHookKey, codexHookStateHeader, foldHookPath, lookupTrust, parseHookStates, splitTomlKey, tomlBasicString } from '../../../src/adapters/pure/codexTrust';
 
 const KEY = '/Users/me/.codex/hooks.json:pre_tool_use:1:0';
 
@@ -92,5 +92,40 @@ trust_level = "trusted"
     }
     const win = { ['C:\\Users\\me\\.codex\\hooks.json:pre_tool_use:0:0']: { trusted_hash: good } };
     assert.strictEqual(lookupTrust(win, 'PreToolUse', 0, 0, good, ['C:\\Users\\me\\.codex\\hooks.json']).status, 'trusted');
+  });
+
+  // ---- Windows spellings, checked on every platform ------------------------------------------------
+
+  test('foldHookPath normalises separators and drive-letter case for Windows paths on any platform', () => {
+    assert.strictEqual(foldHookPath('C:\\Users\\x\\.codex\\hooks.json'), 'c:/users/x/.codex/hooks.json');
+    assert.strictEqual(foldHookPath('c:/Users/X/.codex/hooks.json'), 'c:/users/x/.codex/hooks.json');
+    assert.strictEqual(foldHookPath('\\\\server\\share\\.codex\\hooks.json'), '//server/share/.codex/hooks.json');
+    // POSIX paths keep their case where the filesystem is case-sensitive.
+    if (process.platform === 'linux') assert.strictEqual(foldHookPath('/Users/Me/.codex/hooks.json'), '/Users/Me/.codex/hooks.json');
+  });
+
+  test('a Windows trust key survives the TOML round trip and matches either spelling of the path', () => {
+    const good = codexHookHash('PreToolUse', 'm', { command: 'c', timeout: 7200 });
+    const winPath = 'C:\\Users\\x\\.codex\\hooks.json';
+    // The key has to be escaped: written raw, `\U` and `\r` are TOML escapes and the separators vanish.
+    assert.strictEqual(codexHookStateHeader(winPath, 'PreToolUse', 0, 0), '[hooks.state."C:\\\\Users\\\\x\\\\.codex\\\\hooks.json:pre_tool_use:0:0"]');
+    assert.strictEqual(tomlBasicString('a"b'), '"a\\"b"');
+    const toml = `${codexHookStateHeader(winPath, 'PreToolUse', 0, 0)}\nenabled = true\ntrusted_hash = "${good}"\n`;
+    const states = parseHookStates(toml);
+    assert.deepStrictEqual(Object.keys(states), [codexHookKey(winPath, 'PreToolUse', 0, 0)], 'backslashes survive the round trip');
+    // The adapter may hold the same file as `C:\...` (path.join) or `c:/...` (realpath / raw config).
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, [winPath]).status, 'trusted');
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['c:/Users/x/.codex/hooks.json']).status, 'trusted');
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['C:/USERS/X/.codex/HOOKS.JSON']).status, 'trusted');
+    // A record for a different file still never counts.
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['D:\\Users\\x\\.codex\\hooks.json']).status, 'untrusted');
+  });
+
+  test('an unescaped Windows key (what a naive writer produces) is not silently read as trusted', () => {
+    const good = codexHookHash('PreToolUse', 'm', { command: 'c', timeout: 7200 });
+    const raw = '[hooks.state."C:\\Users\\x\\.codex\\hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "' + good + '"\n';
+    const states = parseHookStates(raw);
+    assert.notDeepStrictEqual(Object.keys(states), ['C:\\Users\\x\\.codex\\hooks.json:pre_tool_use:0:0']);
+    assert.strictEqual(lookupTrust(states, 'PreToolUse', 0, 0, good, ['C:\\Users\\x\\.codex\\hooks.json']).status, 'untrusted');
   });
 });

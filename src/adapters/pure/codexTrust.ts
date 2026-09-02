@@ -24,6 +24,20 @@ export function codexHookKey(hooksJsonPath: string, event: 'PreToolUse' | 'PostT
   return `${hooksJsonPath}:${codexEventLabel(event)}:${groupIndex}:${handlerIndex}`;
 }
 
+/**
+ * Quotes a string as a TOML basic string. Backslashes MUST be escaped: a Windows key written raw
+ * (`"C:\Users\x\.codex\hooks.json:..."`) parses back with its separators eaten (`\U` -> `U`,
+ * `\r` -> a carriage return), which is exactly how a trust record goes missing on Windows.
+ */
+export function tomlBasicString(s: string): string {
+  return `"${s.replace(/[\\"]/g, (c) => `\\${c}`).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')}"`;
+}
+
+/** The exact `[hooks.state."<key>"]` table header Codex writes for one handler, on any platform. */
+export function codexHookStateHeader(hooksJsonPath: string, event: 'PreToolUse' | 'PostToolUse', groupIndex: number, handlerIndex: number): string {
+  return `[hooks.state.${tomlBasicString(codexHookKey(hooksJsonPath, event, groupIndex, handlerIndex))}]`;
+}
+
 export interface CodexHandlerIdentity {
   command: string;
   /** Codex normalises a missing timeout to 600 before hashing. */
@@ -161,10 +175,21 @@ export interface TrustLookup {
   detail: string;
 }
 
-/** Path comparison the way the trust key is written: forward slashes, case-folded on Windows/macOS. */
-function foldPath(p: string): string {
+/** `C:\...`, `C:/...` or a UNC / `\\?\` path — a key that came from a Windows machine. */
+function looksWindows(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\');
+}
+
+/**
+ * Path comparison the way the trust key is written: separators normalised to `/`, and case folded
+ * on a case-insensitive filesystem. Windows-shaped paths are folded wherever they are read, so a
+ * key Codex wrote as `C:\Users\x\.codex\hooks.json` matches the `c:/Users/x/.codex/hooks.json` the
+ * adapter computed (drive-letter case and separator style differ between `path.join`, the raw
+ * config value and `fs.realpathSync.native`).
+ */
+export function foldHookPath(p: string): string {
   const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
-  return process.platform === 'win32' || process.platform === 'darwin' ? norm.toLowerCase() : norm;
+  return process.platform === 'win32' || process.platform === 'darwin' || looksWindows(p) ? norm.toLowerCase() : norm;
 }
 
 /**
@@ -182,8 +207,8 @@ export function lookupTrust(
   hooksJsonPaths?: string[],
 ): TrustLookup {
   const suffix = `:${codexEventLabel(event)}:${groupIndex}:${handlerIndex}`;
-  const wanted = (hooksJsonPaths ?? []).map(foldPath);
-  const sourceMatches = (source: string): boolean => (wanted.length ? wanted.includes(foldPath(source)) : /(^|[\\/])hooks\.json$/i.test(source));
+  const wanted = (hooksJsonPaths ?? []).map(foldHookPath);
+  const sourceMatches = (source: string): boolean => (wanted.length ? wanted.includes(foldHookPath(source)) : /(^|[\\/])hooks\.json$/i.test(source));
   const keys = Object.keys(states).filter((k) => k.endsWith(suffix) && sourceMatches(k.slice(0, -suffix.length)));
   if (keys.length === 0) return { status: 'untrusted', detail: 'Codex has no trust record for the ExplainIT hook yet.' };
   for (const key of keys) {

@@ -12,7 +12,7 @@ import { createStateStore } from '../../../src/core/state';
 import { ClaudeAdapter } from '../../../src/adapters/claude';
 import { CodexAdapter } from '../../../src/adapters/codex';
 import { makeAdapterEnv, userHomeDir, type AdapterEnv, type HostProbe } from '../../../src/adapters/installer';
-import { codexHookHash } from '../../../src/adapters/pure/codexTrust';
+import { codexHookHash, codexHookStateHeader } from '../../../src/adapters/pure/codexTrust';
 import { findOurEntries } from '../../../src/adapters/pure/hookConfig';
 
 const REPO = path.resolve(__dirname, '..', '..', '..', '..');
@@ -212,11 +212,14 @@ suite('adapters/installer (claude + codex round trip)', function () {
     // A matching trust record -> trusted.
     const pre = ours.find((e) => e.event === 'PreToolUse')!;
     const hash = codexHookHash('PreToolUse', pre.matcher, { command: pre.command, timeout: pre.timeout });
-    fs.writeFileSync(sb.codexConfig, `model = "x"\n\n[hooks.state."${sb.codexHooks}:pre_tool_use:${pre.groupIndex}:${pre.handlerIndex}"]\nenabled = true\ntrusted_hash = "${hash}"\n`);
+    // Seed the record through the same helper the adapter reads with: a Windows path has to be
+    // TOML-escaped or its backslashes vanish when the key is parsed back.
+    const header = codexHookStateHeader(sb.codexHooks, 'PreToolUse', pre.groupIndex, pre.handlerIndex);
+    fs.writeFileSync(sb.codexConfig, `model = "x"\n\n${header}\nenabled = true\ntrusted_hash = "${hash}"\n`);
     trust = sb.codex.verify().find((c) => c.name === 'Codex hook trust')!;
     assert.strictEqual(trust.ok, true, trust.detail);
     // A stale record -> modified.
-    fs.writeFileSync(sb.codexConfig, `[hooks.state."${sb.codexHooks}:pre_tool_use:${pre.groupIndex}:${pre.handlerIndex}"]\ntrusted_hash = "sha256:stale"\n`);
+    fs.writeFileSync(sb.codexConfig, `${header}\ntrusted_hash = "sha256:stale"\n`);
     assert.strictEqual(sb.codex.trustStatus().status, 'modified');
     assert.ok(sb.codex.verify().every((c) => c.name === 'Codex hook trust' || c.ok));
   });

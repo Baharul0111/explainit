@@ -8,7 +8,8 @@
 import type { GateSessionInfo, DetectResult, IntegrityReport, DoctorCheck, DoctorReport } from '../../core/interfaces';
 import type { AdapterState, AgentKind, ChannelAvailability } from '../../core/types';
 import { withTimeout } from '../../core/cancel';
-import { codexHookTrust, hasTwinExclude, instructionSectionPresent, formatBytes, type HookOutcome } from './parsers';
+import { codexTrustFromIntegrity, hasTwinExclude, instructionSectionPresent, isCodexTrustCheck, formatBytes, type CodexPaths, type HookOutcome } from './parsers';
+import { withSignInHint } from './messages';
 
 export interface HealthProbeResult {
   ok: boolean;
@@ -51,8 +52,8 @@ export interface DoctorDeps {
   readSessionFile: (pid: number) => Promise<GateSessionInfo | undefined>;
   verifyIntegrity: () => Promise<IntegrityReport>;
   adapterStates: () => Promise<AdapterState[]>;
-  /** `~/.codex/config.toml` text, undefined when the file does not exist. */
-  codexConfigText: () => Promise<string | undefined>;
+  /** Display paths of Codex's hooks.json and config.toml; they honour CODEX_HOME exactly like the adapters. */
+  codexPaths: CodexPaths;
   hookLiveTest: (folder: string) => Promise<HookOutcome>;
   folders: string[];
   kits: KitProbe[];
@@ -113,7 +114,7 @@ export async function checkAssistants(d: DoctorDeps): Promise<DoctorCheck> {
   return check(
     'Assistants detected (terminal tools and VS Code extensions)',
     ok,
-    ok ? lines.join('; ') : `No assistant was found. ${lines.join('; ') || 'Nothing to list.'} Install Claude Code, Codex or Copilot and sign in.`,
+    withSignInHint(ok ? lines.join('; ') : `No assistant was found. ${lines.join('; ') || 'Nothing to list.'} Install Claude Code, Codex or Copilot and sign in.`),
     ok ? undefined : { label: 'Run setup', run: d.fixes.runOnboarding },
   );
 }
@@ -126,7 +127,7 @@ export async function checkChannels(d: DoctorDeps): Promise<DoctorCheck> {
   return check(
     'An assistant can write explanations',
     ok,
-    ok ? `Ready: ${available.map((c) => c.channel).join(', ')}. ${lines.join('; ')}` : `No assistant can write explanations right now. ${lines.join('; ')}`,
+    withSignInHint(ok ? `Ready: ${available.map((c) => c.channel).join(', ')}. ${lines.join('; ')}` : `No assistant can write explanations right now. ${lines.join('; ')}`),
     ok ? undefined : { label: 'Run setup', run: d.fixes.runOnboarding },
   );
 }
@@ -170,7 +171,8 @@ export function hookIntegrityCheck(agent: 'claude' | 'codex', detect: DetectResu
   const name = `${label} checkpoint hook`;
   const present = detect.some((r) => r.agent === agent && r.present);
   const state = states.find((s) => s.agent === agent);
-  const own = integrity.checks.filter((c) => c.name.toLowerCase().includes(agent));
+  // The Codex trust verdict has its own Doctor check (checkCodexTrust); re-arming cannot change it.
+  const own = integrity.checks.filter((c) => c.name.toLowerCase().includes(agent) && !isCodexTrustCheck(c.name));
   const shared = integrity.checks.filter((c) => !/claude|codex|copilot/i.test(c.name));
   const relevant = [...own, ...shared];
   const failed = relevant.filter((c) => !c.ok);
@@ -187,10 +189,12 @@ export function hookIntegrityCheck(agent: 'claude' | 'codex', detect: DetectResu
     });
   }
   if (failed.length) {
-    return check(name, false, `Problems: ${failed.map((c) => `${c.name}${c.detail ? ` (${c.detail})` : ''}`).join('; ')}. The hook, its wrapper or its config entry was changed.`, {
-      label: 'Re-arm the hooks',
-      run: d.fixes.rearm,
-    });
+    const list = failed.map((c) => `${c.name}${c.detail ? ` (${c.detail})` : ''}`).join('; ');
+    // A check the adapter marks fixable=false (for example a config file that is not valid JSON) needs a
+    // hand: re-arming would not change it, so no fix action is offered.
+    const fixable = failed.some((c) => c.fixable !== false);
+    if (!fixable) return check(name, false, `Problems: ${list}. ExplainIT cannot fix this by itself; follow the steps in the details, then run the Doctor again.`);
+    return check(name, false, `Problems: ${list}. The hook, its wrapper or its config entry was changed.`, { label: 'Re-arm the hooks', run: d.fixes.rearm });
   }
   const armed = state?.armed !== false;
   const notes = state?.notes?.length ? ` ${state.notes.join(' ')}` : '';
@@ -202,23 +206,40 @@ export async function checkHookIntegrity(d: DoctorDeps): Promise<DoctorCheck[]> 
   return [hookIntegrityCheck('claude', detect, states, integrity, d), hookIntegrityCheck('codex', detect, states, integrity, d)];
 }
 
+/**
+ * Codex only runs hooks the person has trusted. The Codex adapter reproduces Codex's trust hash and reports
+ * the verdict as an integrity check named "Codex hook trust" (ok=false, fixable=false when not trusted). The
+ * Doctor shows that verdict and its detail verbatim, because the detail carries the exact steps (open codex
+ * once in a terminal and choose Trust, or type /hooks; the Codex VS Code extension shares the record). No
+ * fix action is offered for any trust problem: only the person can trust a hook inside codex.
+ */
 export async function checkCodexTrust(d: DoctorDeps): Promise<DoctorCheck> {
   const name = 'Codex trusts the ExplainIT hook';
-  const [detect, states] = await Promise.all([d.detect(), d.adapterStates()]);
+  const [detect, states, integrity] = await Promise.all([d.detect(), d.adapterStates(), d.verifyIntegrity()]);
   const present = detect.some((r) => r.agent === 'codex' && r.present);
   const installed = states.find((s) => s.agent === 'codex')?.installed === true;
   if (!present && !installed) return check(name, true, 'Codex is not installed on this computer, so there is nothing to trust.');
-  if (!installed) return check(name, false, 'The Codex hook is not installed yet, so Codex has nothing to trust.', { label: 'Install the Codex hook', run: () => d.fixes.installHook('codex') });
-  const trust = codexHookTrust(await d.codexConfigText());
-  switch (trust) {
+  if (!installed) {
+    return check(name, false, `The Codex hook is not installed yet (no ExplainIT entry in ${d.codexPaths.hooksJson}), so Codex has nothing to trust.`, {
+      label: 'Install the Codex hook',
+      run: () => d.fixes.installHook('codex'),
+    });
+  }
+  const trust = codexTrustFromIntegrity(integrity);
+  switch (trust.status) {
     case 'trusted':
-      return check(name, true, 'Codex recorded the ExplainIT hook as trusted in ~/.codex/config.toml (shared by the terminal tool and the VS Code extension).');
-    case 'untrusted':
-      return check(name, false, 'Codex recorded the ExplainIT hook as NOT trusted, so it will not run. Start Codex once and choose "trust" when it asks about the ExplainIT hook.');
-    case 'no-config':
-      return check(name, false, 'Codex has no ~/.codex/config.toml yet, so it has not trusted the hook. Start Codex once (terminal or extension) and choose "trust" when asked.');
+      return check(name, true, trust.detail);
+    case 'unknown':
+      // "Trust unknown — run the Doctor after starting codex once." Nothing ExplainIT can do until then.
+      return check(name, false, trust.detail);
+    case 'not-trusted':
+      return check(name, false, trust.detail);
     default:
-      return check(name, false, 'Codex has not recorded a trust decision for the ExplainIT hook. Start Codex once (terminal or extension) and choose "trust" when it asks. Until then Codex changes are not stopped for review.');
+      return check(
+        name,
+        false,
+        `ExplainIT could not read whether Codex trusts the hook (Codex records trust in ${d.codexPaths.configToml}). Open codex in a terminal once and choose Trust when it shows the ExplainIT hook (or type /hooks), then run the Doctor again.`,
+      );
   }
 }
 

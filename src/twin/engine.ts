@@ -17,7 +17,7 @@ import { isCodeLanguage, languageIdForPath, MAX_TWIN_SOURCE_BYTES } from './pure
 import { isTwinPath, sourceNameForTwin, twinPathFrom } from './pure/naming';
 import { isFullyExplained, parseTwin, type ParsedTwin } from './pure/parse';
 import { renderTwin, type SectionContent } from './pure/render';
-import { readSidecar, sidecarPathFor, writeSidecar } from './pure/sidecar';
+import { deleteSidecar, readSidecar, sidecarPathFor, writeSidecar } from './pure/sidecar';
 import { fileSummaryOf, functionText, planSections, snapshotDocument, toRenderSections, toSidecarSections, type GenerateMode, type PlanEntry, type TwinPlan, type TwinSidecar } from './pure/stale';
 import { minimalLineReplace } from './pure/textEdit';
 import { askInfo, errorMessage, isTestMode, notice } from './prompt';
@@ -512,9 +512,10 @@ export class TwinEngineImpl implements TwinEngine {
     const produced = new Map<string, SectionContent>();
     const pending = new Set(plan.toGenerate.map((e) => e.fn.id));
 
+    /** What the sidecar file holds right now (so a failed twin write can put it back). */
+    let committed: TwinSidecar | undefined = sidecar;
     const commit = async (final: boolean): Promise<TwinFile> => {
       const rendered = renderTwin(base, toRenderSections(plan, produced, final ? new Set() : pending));
-      await this.writeTwin(twinPath, rendered.text);
       const next: TwinSidecar = {
         sourcePath: key,
         twinPath,
@@ -522,7 +523,17 @@ export class TwinEngineImpl implements TwinEngine {
         sections: toSidecarSections(plan, produced, rendered.sections),
         generatedAt: new Date().toISOString(),
       };
+      // Sidecar first, twin second: the moment the new twin shows up on disk (an editor save is visible
+      // to everyone at once) its metadata - stale flags, hashes, line ranges - already describes it.
       await writeSidecar(sidecarFile, next);
+      try {
+        await this.writeTwin(twinPath, rendered.text);
+      } catch (e) {
+        if (committed) await writeSidecar(sidecarFile, committed).catch(() => undefined);
+        else await deleteSidecar(sidecarFile);
+        throw e;
+      }
+      committed = next;
       this.remember({ source: key, twinPath, sidecar: next, map, mapKey });
       if (previousTwinPath) {
         // Once, after the first successful write of the new twin (commit runs again while streaming).

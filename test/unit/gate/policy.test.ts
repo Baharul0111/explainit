@@ -6,14 +6,17 @@ import type { ProposedWrite } from '../../../src/core/types';
 import {
   checkWritePolicy,
   claudeHooksChanged,
+  codexHomeOf,
   codexHookLines,
   codexHooksChanged,
   isGitInfoExclude,
   isInsideGitDir,
   protectedPathMentioned,
+  tomlLooksValid,
   type PolicyContext,
 } from '../../../src/gate/pure/policy';
 import { resolveTarget } from '../../../src/gate/pure/ingress';
+import { applyEdit, applyEdits } from '../../../src/gate/pure/proposals';
 
 suite('gate/pure/policy', () => {
   let root: string;
@@ -124,6 +127,141 @@ suite('gate/pure/policy', () => {
       assert.equal(checkWritePolicy(modify(p, before, '{"hooks": {}}'), ctx).action, 'deny');
       assert.equal(checkWritePolicy(modify(p, before, 'nope'), ctx).action, 'deny');
       assert.equal(codexHooksChanged('hooks.json', null, '{}'), false);
+    });
+  });
+
+  suite('hook script parity: partial edits replayed onto the full file', () => {
+    const CMD = '/x/hooks/explainit-hook.sh --agent claude';
+    const MATCHER = 'Write|Edit|MultiEdit|NotebookEdit|Bash';
+    const PRE_ENTRY = `      { "matcher": "${MATCHER}", "hooks": [{ "type": "command", "command": "${CMD}", "timeout": 7200 }] }\n`;
+    const POST_ENTRY = `      { "matcher": "${MATCHER}", "hooks": [{ "type": "command", "command": "${CMD} --event PostToolUse", "timeout": 10 }] }\n`;
+    const settingsText = `{\n  "model": "opus",\n  "hooks": {\n    "PreToolUse": [\n${PRE_ENTRY}    ],\n    "PostToolUse": [\n${POST_ENTRY}    ]\n  },\n  "theme": "dark"\n}\n`;
+    const toml = ['model = "gpt-5"', '', '[features]', 'hooks = true', '', '[hooks.state."abc"]', 'trusted_hash = "sha256:1111"', 'enabled = true', '', '[hooks.state."def"]', 'trusted_hash = "sha256:2222"', '', '[tui]', 'theme = "dark"', ''].join('\n');
+    const edited = (before: string, old_string: string, new_string: string): string => {
+      const r = applyEdit(before, { old_string, new_string });
+      assert.equal(r.ok, true, 'fixture edit must apply');
+      return (r as { after: string }).after;
+    };
+
+    test('Edit that swaps "--agent claude" for "--agent x" inside our hook entry -> deny', () => {
+      const p = path.join(userHome, '.claude', 'settings.json');
+      assert.ok(JSON.parse(settingsText), 'fixture is valid JSON');
+      const after = edited(settingsText, '--agent claude"', '--agent x"');
+      const r = checkWritePolicy(modify(p, settingsText, after), ctx, { partial: true });
+      assert.equal(r.action, 'deny');
+      assert.match((r as { reason: string }).reason, /hooks/);
+    });
+
+    test('Edit that changes an unrelated setting in settings.json -> allow (normal flow)', () => {
+      const p = path.join(userHome, '.claude', 'settings.json');
+      const after = edited(settingsText, '"theme": "dark"', '"theme": "light"');
+      assert.deepEqual(checkWritePolicy(modify(p, settingsText, after), ctx, { partial: true }), { action: 'allow' });
+      // Reformatting the whole file without touching hooks is fine too.
+      assert.deepEqual(checkWritePolicy(modify(p, settingsText, JSON.stringify(JSON.parse(settingsText))), ctx), { action: 'allow' });
+    });
+
+    test('MultiEdit that removes our entry -> deny; unparseable result -> deny', () => {
+      const p = path.join(ws, '.claude', 'settings.json');
+      const removed = applyEdits(settingsText, [
+        { old_string: '"theme": "dark"', new_string: '"theme": "light"' },
+        { old_string: PRE_ENTRY, new_string: '' },
+      ]);
+      assert.equal(removed.ok, true);
+      assert.ok(JSON.parse((removed as { after: string }).after), 'the result is still valid JSON, only our entry is gone');
+      const r = checkWritePolicy(modify(p, settingsText, (removed as { after: string }).after), ctx, { partial: true });
+      assert.equal(r.action, 'deny');
+      // Deleting the closing brace leaves invalid JSON: the hooks cannot be verified, so deny.
+      const broken = edited(settingsText, '"timeout": 7200', '"timeout": 7200,');
+      const b = checkWritePolicy(modify(p, settingsText, broken), ctx, { partial: true });
+      assert.equal(b.action, 'deny');
+      assert.match((b as { reason: string }).reason, /not valid JSON/);
+    });
+
+    test('a .claude/settings.json in a sub-folder of the workspace is protected the same way', () => {
+      const p = path.join(ws, 'packages', 'api', '.claude', 'settings.local.json');
+      assert.equal(checkWritePolicy(modify(p, settingsText, edited(settingsText, '--agent claude"', '--agent x"')), ctx).action, 'deny');
+      assert.deepEqual(checkWritePolicy(modify(p, settingsText, edited(settingsText, '"dark"', '"light"')), ctx), { action: 'allow' });
+    });
+
+    test('config.toml edit that changes trusted_hash, a sha256 value or an enabled switch -> deny', () => {
+      const p = path.join(userHome, '.codex', 'config.toml');
+      for (const [from, to] of [
+        ['trusted_hash = "sha256:1111"', 'trusted_hash = "sha256:9999"'],
+        ['sha256:2222', 'sha256:0000'],
+        ['enabled = true', 'enabled = false'],
+        ['hooks = true', 'hooks = false'],
+      ]) {
+        const r = checkWritePolicy(modify(p, toml, edited(toml, from, to)), ctx, { partial: true });
+        assert.equal(r.action, 'deny', `${from} -> ${to}`);
+        assert.match((r as { reason: string }).reason, /hook/);
+      }
+      assert.deepEqual(checkWritePolicy(modify(p, toml, edited(toml, 'theme = "dark"', 'theme = "light"')), ctx, { partial: true }), { action: 'allow' });
+    });
+
+    test('config.toml: swapping the trust hashes of two hooks keeps the same set of lines but is still a change', () => {
+      const swapped = toml.replace('sha256:1111', 'TMP').replace('sha256:2222', 'sha256:1111').replace('TMP', 'sha256:2222');
+      assert.equal(codexHooksChanged('config.toml', toml, swapped), true);
+      assert.equal(codexHooksChanged('config.toml', toml, toml), false);
+      assert.equal(codexHooksChanged('config.toml', toml, toml.replace(/\n/g, '\r\n')), false, 'line endings do not matter');
+    });
+
+    test('config.toml: a trusted_hash line outside any hooks table is still compared, and so is a header naming explainit', () => {
+      const flat = 'trusted_hash = "sha256:aaaa"\nmodel = "x"\n\n[projects."/home/me/explainit"]\ntrust_level = "trusted"\n';
+      assert.deepEqual(codexHookLines(flat), ['trusted_hash = "sha256:aaaa"', '[projects."/home/me/explainit"]']);
+      assert.equal(codexHooksChanged('config.toml', flat, flat.replace('aaaa', 'bbbb')), true);
+      assert.equal(codexHooksChanged('config.toml', flat, flat.replace('/home/me/explainit', '/home/me/other')), true);
+    });
+
+    test('unparseable TOML -> unparseable -> deny', () => {
+      assert.equal(tomlLooksValid(toml), true);
+      assert.equal(tomlLooksValid(null), true);
+      assert.equal(tomlLooksValid('hooks = [\n  "a",\n  "b",\n]\n[features]\nhooks = true\n'), true, 'multi-line arrays are fine');
+      assert.equal(tomlLooksValid('notes = """\nfree text without equals\n"""\nx = 1\n'), true, 'multi-line strings are fine');
+      assert.equal(tomlLooksValid('[hooks.state."a]b"]\ntrusted_hash = "sha256:1"\n'), true, 'brackets inside quoted keys are fine');
+      assert.equal(tomlLooksValid('this is not toml\n'), false);
+      assert.equal(tomlLooksValid('[features]\nhooks = true\n{{{{\n'), false);
+      assert.equal(tomlLooksValid('hooks = [\n  "a",\n'), false, 'unclosed array');
+      assert.equal(codexHooksChanged('config.toml', toml, 'garbage'), 'unparseable');
+      const p = path.join(userHome, '.codex', 'config.toml');
+      const r = checkWritePolicy(modify(p, toml, 'garbage'), ctx, { partial: true });
+      assert.equal(r.action, 'deny');
+      assert.match((r as { reason: string }).reason, /cannot be parsed/);
+    });
+
+    test('hooks.json: any partial edit counts as a hooks change, even a whitespace-only one', () => {
+      const p = path.join(userHome, '.codex', 'hooks.json');
+      const before = '{"hooks": {"PreToolUse": [{"matcher": "apply_patch"}]}}\n';
+      const reformatted = JSON.stringify(JSON.parse(before), null, 2) + '\n';
+      const r = checkWritePolicy(modify(p, before, reformatted), ctx, { partial: true });
+      assert.equal(r.action, 'deny');
+      assert.match((r as { reason: string }).reason, /nothing but hooks/);
+      // A whole-file write that lands the same parsed content is not a hooks change.
+      assert.deepEqual(checkWritePolicy(modify(p, before, reformatted), ctx), { action: 'allow' });
+      // Unparseable proposed JSON is refused either way.
+      assert.equal(checkWritePolicy(modify(p, before, '{"hooks": '), ctx).action, 'deny');
+      assert.equal(checkWritePolicy(modify(p, before, '{"hooks": '), ctx, { partial: true }).action, 'deny');
+    });
+
+    test('CODEX_HOME: hooks.json and config.toml are resolved under it', () => {
+      const codexHome = path.join(root, 'codex-home');
+      fs.mkdirSync(codexHome, { recursive: true });
+      const withHome: PolicyContext = { ...ctx, codexHome };
+      assert.equal(codexHomeOf(withHome), codexHome);
+      assert.equal(codexHomeOf(ctx), path.join(userHome, '.codex'));
+      assert.equal(codexHomeOf({ ...ctx, codexHome: '  ' }), path.join(userHome, '.codex'), 'blank CODEX_HOME means the default');
+      const hooksJson = path.join(codexHome, 'hooks.json');
+      const configToml = path.join(codexHome, 'config.toml');
+      assert.equal(checkWritePolicy(modify(hooksJson, '{}', '{"hooks": {"PreToolUse": []}}'), withHome).action, 'deny');
+      assert.equal(checkWritePolicy(modify(hooksJson, '{}', '{}'), withHome, { partial: true }).action, 'deny');
+      assert.equal(checkWritePolicy(modify(configToml, toml, edited(toml, 'sha256:1111', 'sha256:9999')), withHome).action, 'deny');
+      assert.deepEqual(checkWritePolicy(modify(configToml, toml, edited(toml, 'theme = "dark"', 'theme = "light"')), withHome), { action: 'allow' });
+      assert.equal(checkWritePolicy({ kind: 'delete', path: hooksJson, before: '{}', after: null }, withHome).action, 'deny');
+      // Without CODEX_HOME the same folder is an ordinary place (outside the workspace).
+      assert.deepEqual(checkWritePolicy(modify(hooksJson, '{}', '{"hooks": {"PreToolUse": []}}'), ctx), { action: 'allow' });
+      // Shell mentions of the CODEX_HOME files are caught as well, in any letter case.
+      assert.ok(protectedPathMentioned(`cat ${configToml}`, withHome));
+      assert.ok(protectedPathMentioned(`cat ${hooksJson.toUpperCase()}`, withHome));
+      assert.equal(protectedPathMentioned(`cat ${configToml}`, ctx), undefined);
     });
   });
 

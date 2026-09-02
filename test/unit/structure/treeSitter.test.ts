@@ -181,7 +181,8 @@ suite('structure/pure/treeSitter', function () {
   });
 
   test('CRLF text gives the same lines and hashes as LF text', async () => {
-    const lf = fixture('src/app.py');
+    // Normalise first: a Windows checkout may already hold CRLF, and doubling it would skew line numbers.
+    const lf = fixture('src/app.py').replace(/\r\n?/g, '\n');
     const crlf = lf.replace(/\n/g, '\r\n');
     const a = buildFunctionMap(lf, 'python', 'f', 'tree-sitter', (await service.parseFunctions(lf, 'python'))!.functions);
     const b = buildFunctionMap(crlf, 'python', 'f', 'tree-sitter', (await service.parseFunctions(crlf, 'python'))!.functions);

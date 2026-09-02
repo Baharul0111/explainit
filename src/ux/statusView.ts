@@ -3,10 +3,13 @@
  * reviews and the last decision. Refreshes on status changes (throttled) and on demand.
  */
 import * as vscode from 'vscode';
+import * as os from 'node:os';
 import type { AdapterManager, Disposable, GateServer, SafetyKit } from '../core/interfaces';
 import type { JournalEntry } from '../core/types';
 import type { Logger } from '../core/log';
+import { explainitHome } from '../core/paths';
 import { AGENT_LABEL } from './pure/doctorChecks';
+import { codexPathsFor } from './pure/parsers';
 import { channelLabel } from './pure/statusModel';
 import type { StatusBar } from './statusBar';
 
@@ -40,6 +43,8 @@ export class StatusTreeProvider implements vscode.TreeDataProvider<StatusItem> {
   private lastRequest: { agent: string; path: string; when: string } | undefined;
   private refreshTimer: NodeJS.Timeout | undefined;
   readonly view: vscode.TreeView<StatusItem>;
+  /** Codex honours CODEX_HOME; show the same files the adapters read. */
+  private readonly codexPaths = codexPathsFor(process.env, os.homedir(), explainitHome());
 
   constructor(private readonly deps: StatusViewDeps) {
     this.view = vscode.window.createTreeView('explainit.statusView', { treeDataProvider: this, showCollapseAll: false });
@@ -125,8 +130,14 @@ export class StatusTreeProvider implements vscode.TreeDataProvider<StatusItem> {
     const assistantChildren = (['claude', 'codex', 'copilot'] as const).map((a) => {
       const found = facts.assistants.includes(a);
       const armed = facts.armedAgents.includes(a);
-      const desc = !found ? 'not found' : a === 'copilot' ? 'found (review after landing)' : armed ? 'found, hook armed' : 'found, hook not installed';
-      return new StatusItem(AGENT_LABEL[a], desc, { icon: found ? 'check' : 'circle-slash', command: found ? undefined : 'explainit.setupAssistants' });
+      const installed = facts.installedAgents.includes(a);
+      // "installed but not armed" is the Codex-not-yet-trusted case (among others); the adapter's notes say why.
+      const desc = !found ? 'not found' : a === 'copilot' ? 'found (review after landing)' : armed ? 'found, hook armed' : installed ? 'found, hook installed but not armed' : 'found, hook not installed';
+      const notes = [...(facts.agentNotes[a] ?? [])];
+      if (a === 'codex') notes.push(`Codex reads its hooks from ${this.codexPaths.hooksJson} and records hook trust in ${this.codexPaths.configToml}.`);
+      const icon = !found ? 'circle-slash' : a !== 'copilot' && installed && !armed ? 'warning' : 'check';
+      const command = !found ? 'explainit.setupAssistants' : installed && !armed ? 'explainit.doctor' : undefined;
+      return new StatusItem(AGENT_LABEL[a], desc, { icon, command, tooltip: notes.join('\n') || undefined });
     });
     const assistants = new StatusItem('Assistants', facts.assistants.length ? `${facts.assistants.length} found` : 'none found', { icon: 'hubot', children: assistantChildren, command: 'explainit.setupAssistants' });
     const pending = new StatusItem('Pending reviews', facts.pending > 0 ? `${facts.pending} waiting` : 'none', { icon: facts.pending > 0 ? 'bell-dot' : 'bell' });

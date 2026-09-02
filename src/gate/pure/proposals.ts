@@ -5,6 +5,11 @@
  * Claude: Write (create/modify), Edit (old_string -> new_string, replace_all), MultiEdit
  * (sequential). NotebookEdit is answered 'ask' by the controller and never reaches here.
  * Codex: apply_patch via applyPatch.ts; Write/Edit like Claude.
+ *
+ * Every ProposedWrite carries the FULL file content on both sides: partial edits are replayed onto
+ * the current file exactly as the agent would apply them. The protected-path policy relies on that
+ * to compare parsed `hooks` objects (settings.json, hooks.json) and hook / trust lines (config.toml)
+ * rather than the edit's fragments, so a small Edit cannot slip a hooks change past the checkpoint.
  */
 import type { ProposedWrite } from '../../core/types';
 import { applyUpdateChunks, extractPatchText, parsePatch } from './applyPatch';

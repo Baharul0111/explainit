@@ -2,7 +2,10 @@
  * claude / codex channels driven through the fake CLIs (test/fixtures/fake-cli) in every mode.
  */
 import * as assert from 'node:assert/strict';
-import { classifyCliFailure, createClaudeChannel, extractStreamDeltas, parseClaudeJson, parseClaudeStream, claudeArgs } from '../../../src/generation/channels/claude';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { classifyCliFailure, createClaudeChannel, describeFailure, extractStreamDeltas, looksSignedOut, parseClaudeJson, parseClaudeStream, claudeArgs } from '../../../src/generation/channels/claude';
+import { SIGN_IN_MESSAGE, type ResolveOptions } from '../../../src/generation/channels/cli';
 import { codexArgs, createCodexChannel, parseCodexEventLine, parseCodexJsonStdout } from '../../../src/generation/channels/codex';
 import { ChannelError, type ChannelRequest } from '../../../src/generation/channels/types';
 import { buildExplainPrompt } from '../../../src/generation/pure/prompts';
@@ -33,7 +36,28 @@ suite('generation/channels (fake CLIs)', function () {
   teardown(() => rmDir(home));
 
   const claude = () => createClaudeChannel({ logger: silentLogger(), settings: settings({ claudeCliPath: `node ${FAKE_CLAUDE}` }), homeDir: home, resolveOptions: { noVscode: true, extensionRoots: [] } });
-  const codex = () => createCodexChannel({ logger: silentLogger(), settings: settings({ codexCliPath: `node ${FAKE_CODEX}` }), homeDir: home, resolveOptions: { noVscode: true, extensionRoots: [] } });
+
+  /** A hermetic Codex home (CODEX_HOME) so the tests never look at the real ~/.codex or an API key in the environment. */
+  const codexEnv = (codexHome: string): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome };
+    delete env.OPENAI_API_KEY;
+    delete env.CODEX_API_KEY;
+    return env;
+  };
+  const signInToCodex = (codexHome: string): void => {
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify({ tokens: { access_token: 'fake' } }));
+  };
+  const codex = (opts: { signedIn?: boolean; resolveOptions?: Partial<ResolveOptions> } = {}) => {
+    const codexHome = path.join(home, 'codex-home');
+    if (opts.signedIn !== false) signInToCodex(codexHome);
+    return createCodexChannel({
+      logger: silentLogger(),
+      settings: settings({ codexCliPath: `node ${FAKE_CODEX}` }),
+      homeDir: home,
+      resolveOptions: { noVscode: true, extensionRoots: [], env: codexEnv(codexHome), ...(opts.resolveOptions ?? {}) },
+    });
+  };
 
   test('argument shapes match the verified real CLIs', () => {
     assert.deepEqual(claudeArgs(false), ['-p', '--tools', '', '--no-session-persistence', '--strict-mcp-config', '--output-format', 'json']);
@@ -132,6 +156,53 @@ suite('generation/channels (fake CLIs)', function () {
       assert.match(r.text, /poem/);
     }));
 
+  test('claude: revoked sign-in (json and streaming) -> ChannelError auth with the fixed sign-in message', () =>
+    withMode('revoked', async () => {
+      const isSignedOut = (e: unknown): boolean => e instanceof ChannelError && e.channel === 'claude' && e.reason === 'auth' && e.message === SIGN_IN_MESSAGE.claude;
+      await assert.rejects(claude().send(req()), isSignedOut);
+      await assert.rejects(claude().send(req(() => undefined)), isSignedOut);
+      assert.equal(SIGN_IN_MESSAGE.claude, 'Claude Code is not signed in on this computer. Run "claude" in a terminal and sign in, then try again.');
+    }));
+
+  test('codex: revoked sign-in (plain and --json) -> ChannelError auth with the fixed sign-in message', () =>
+    withMode('revoked', async () => {
+      const isSignedOut = (e: unknown): boolean => e instanceof ChannelError && e.channel === 'codex' && e.reason === 'auth' && e.message === SIGN_IN_MESSAGE.codex;
+      const ch = codex();
+      await assert.rejects(ch.send(req()), isSignedOut);
+      await assert.rejects(ch.send(req(() => undefined)), isSignedOut);
+      assert.equal(SIGN_IN_MESSAGE.codex, 'Codex is not signed in on this computer. Run "codex login" in a terminal, then try again.');
+    }));
+
+  test('codex: no auth.json under CODEX_HOME -> not available, with the sign-in message as the reason', () =>
+    withMode('ok', async () => {
+      const a = await codex({ signedIn: false }).availability();
+      assert.equal(a.available, false);
+      assert.equal(a.reason, SIGN_IN_MESSAGE.codex);
+      assert.match(a.detail ?? '', /no sign-in file at .*codex-home.*auth\.json/);
+      // Signing in (codex login writes auth.json) flips it without restarting anything.
+      const b = await codex().availability();
+      assert.equal(b.available, true, b.reason);
+      assert.match(b.detail ?? '', /sign-in file found/);
+    }));
+
+  test('codex: without CODEX_HOME the sign-in file is <home>/.codex/auth.json; an API key in the environment also counts', () =>
+    withMode('ok', async () => {
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      delete env.CODEX_HOME;
+      delete env.OPENAI_API_KEY;
+      delete env.CODEX_API_KEY;
+      const make = (extra: NodeJS.ProcessEnv) => createCodexChannel({ logger: silentLogger(), settings: settings({ codexCliPath: `node ${FAKE_CODEX}` }), homeDir: home, resolveOptions: { noVscode: true, extensionRoots: [], homeDir: home, env: { ...env, ...extra } } });
+      const none = await make({}).availability();
+      assert.equal(none.available, false);
+      assert.match(none.detail ?? '', new RegExp(path.join(home, '.codex', 'auth.json').replace(/[\\.]/g, '\\$&')));
+      signInToCodex(path.join(home, '.codex'));
+      assert.equal((await make({}).availability()).available, true);
+      fs.rmSync(path.join(home, '.codex'), { recursive: true, force: true });
+      const withKey = await make({ OPENAI_API_KEY: 'sk-test' }).availability();
+      assert.equal(withKey.available, true, withKey.reason);
+      assert.match(withKey.detail ?? '', /OPENAI_API_KEY/);
+    }));
+
   suite('pure parsers', () => {
     test('parseClaudeJson handles the result object, error results and junk', () => {
       const ok = parseClaudeJson(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'hello' }));
@@ -163,6 +234,27 @@ suite('generation/channels (fake CLIs)', function () {
       assert.equal(classifyCliFailure('You have hit your usage limit'), 'quota');
       assert.equal(classifyCliFailure('429 too many requests'), 'quota');
       assert.equal(classifyCliFailure('segfault'), 'failed');
+    });
+
+    test('signed-out output of the real CLIs maps to auth and the fixed sign-in messages', () => {
+      const claudeOutputs = [
+        'Not logged in · Please run /login',
+        'Please run /login',
+        'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+      ];
+      const codexOutputs = [
+        'ERROR: refresh token was revoked',
+        'Please log out and sign in again.',
+        '{"error":{"code":"token_revoked"}}',
+        'ERROR: 401 Unauthorized',
+      ];
+      for (const o of [...claudeOutputs, ...codexOutputs]) {
+        assert.ok(looksSignedOut(o), o);
+        assert.equal(classifyCliFailure(o), 'auth', o);
+      }
+      assert.equal(describeFailure('Claude Code', 'auth', 'Not logged in', 1), 'Claude Code is not signed in on this computer. Run "claude" in a terminal and sign in, then try again.');
+      assert.equal(describeFailure('Codex', 'auth', 'refresh token was revoked', 1), 'Codex is not signed in on this computer. Run "codex login" in a terminal, then try again.');
+      for (const o of ['segfault', 'stream closed', 'Codex is working…', 'The token budget for this turn was exceeded']) assert.ok(!looksSignedOut(o), o);
     });
 
     test('codex event parsing', () => {

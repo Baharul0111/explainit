@@ -36,6 +36,9 @@ export class StatusBar {
   private channel = 'none';
   private assistants: string[] = [];
   private armedAgents: string[] = [];
+  private installedAgents: string[] = [];
+  /** The adapters' plain-English notes per agent (for example the Codex trust verdict), for tooltips. */
+  private agentNotes: Record<string, string[]> = {};
   private probing = false;
   private lastFactsRefresh = 0;
   private timer: NodeJS.Timeout | undefined;
@@ -69,8 +72,8 @@ export class StatusBar {
     return this.view;
   }
 
-  get facts(): { channel: string; assistants: string[]; armedAgents: string[]; pending: number } {
-    return { channel: this.channel, assistants: this.assistants, armedAgents: this.armedAgents, pending: this.tracker.pending };
+  get facts(): { channel: string; assistants: string[]; armedAgents: string[]; installedAgents: string[]; agentNotes: Record<string, string[]>; pending: number } {
+    return { channel: this.channel, assistants: this.assistants, armedAgents: this.armedAgents, installedAgents: this.installedAgents, agentNotes: this.agentNotes, pending: this.tracker.pending };
   }
 
   private onHeartbeat(hb: { ts: string; pending: number }): void {
@@ -155,6 +158,8 @@ export class StatusBar {
       this.channel = channel;
       this.assistants = detect.filter((d) => d.present).map((d) => d.agent);
       this.armedAgents = states.filter((s) => s.installed && s.armed).map((s) => s.agent);
+      this.installedAgents = states.filter((s) => s.installed).map((s) => s.agent);
+      this.agentNotes = Object.fromEntries(states.map((s) => [s.agent, (s.notes ?? []).filter((n) => typeof n === 'string' && n.trim())]));
     } catch (e) {
       this.deps.logger.debug('status facts refresh failed', e);
     }

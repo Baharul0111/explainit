@@ -58,6 +58,7 @@ function healthyDeps(over: Partial<DoctorDeps> = {}): DoctorDeps {
         { name: 'claude settings entry', ok: true },
         { name: 'codex script hash', ok: true },
         { name: 'codex hooks.json entry', ok: true },
+        { name: 'Codex hook trust', ok: true, detail: 'Codex trusts the ExplainIT hook.' },
         { name: 'hook script', ok: true },
       ],
     }),
@@ -65,7 +66,7 @@ function healthyDeps(over: Partial<DoctorDeps> = {}): DoctorDeps {
       { agent: 'claude', installed: true, armed: true },
       { agent: 'codex', installed: true, armed: true },
     ],
-    codexConfigText: async () => '[hooks.state]\n"explainit-hook.sh --agent codex" = "trusted"\n',
+    codexPaths: { hooksJson: '~/.codex/hooks.json', configToml: '~/.codex/config.toml' },
     hookLiveTest: async () => ({ answered: true, decision: 'allow' }),
     folders: [FOLDER],
     kits: [
@@ -224,20 +225,143 @@ suite('ux/pure/doctorChecks', () => {
     assert.ok(claude.detail.includes('restart Claude Code'));
   });
 
-  test('codex trust states', async () => {
-    assert.equal((await checkCodexTrust(healthyDeps())).ok, true);
-    const noConfig = await checkCodexTrust(healthyDeps({ codexConfigText: async () => undefined }));
-    assert.equal(noConfig.ok, false);
-    assert.ok(noConfig.detail.includes('trust'));
-    const untrusted = await checkCodexTrust(healthyDeps({ codexConfigText: async () => '[hooks.state]\nexplainit = false\n' }));
-    assert.equal(untrusted.ok, false);
-    const noRecord = await checkCodexTrust(healthyDeps({ codexConfigText: async () => '[hooks.state]\nother = "trusted"\n' }));
-    assert.equal(noRecord.ok, false);
+  // Exact shapes produced by src/adapters/codex.ts extraChecks(); TRUST_STEP is the adapter's CODEX_TRUST_STEP.
+  const TRUST_STEP =
+    'Codex only runs hooks you have trusted: open codex in a terminal once, and when it shows the ExplainIT hook choose Trust (or type /hooks). The Codex VS Code extension uses the same trust record.';
+  const TRUST_OK = { name: 'Codex hook trust', ok: true, detail: 'Codex trusts the ExplainIT hook.' };
+  const TRUST_UNTRUSTED = { name: 'Codex hook trust', ok: false, fixable: false, detail: `Codex has no trust record for the ExplainIT hook yet. ${TRUST_STEP}` };
+  const TRUST_MODIFIED = {
+    name: 'Codex hook trust',
+    ok: false,
+    fixable: false,
+    detail: `Codex has a trust record for the ExplainIT hook, but it does not match the current hook entry. Codex will not run it until you trust it again. ${TRUST_STEP}`,
+  };
+  const TRUST_DISABLED = { name: 'Codex hook trust', ok: false, fixable: false, detail: 'The ExplainIT hook is disabled in Codex (enabled = false in config.toml). Enable it in codex with /hooks.' };
+  const TRUST_UNKNOWN = {
+    name: 'Codex hook trust',
+    ok: false,
+    fixable: false,
+    detail: 'Trust unknown — run the Doctor after starting codex once. (No ExplainIT PreToolUse entry in hooks.json. Config: ~/.codex/config.toml)',
+  };
+  const withTrust = (trust: { name: string; ok: boolean; detail?: string; fixable?: boolean }, over: Partial<DoctorDeps> = {}) =>
+    healthyDeps({
+      verifyIntegrity: async () => ({
+        ok: trust.ok,
+        checks: [
+          { name: 'Claude Code hook script', ok: true, detail: 'Hook script present and unchanged.' },
+          { name: '~/.claude/settings.json', ok: true, detail: 'Checkpoint hook entries present and unchanged in ~/.claude/settings.json.' },
+          { name: 'Codex hook script', ok: true, detail: 'Hook script present and unchanged.' },
+          { name: 'Codex hook wrapper', ok: true, detail: 'Wrapper script present and unchanged.' },
+          { name: '~/.codex/hooks.json', ok: true, detail: 'Checkpoint hook entries present and unchanged in ~/.codex/hooks.json.' },
+          trust,
+        ],
+      }),
+      ...over,
+    });
+
+  test('codex trust: the adapter verdict is shown verbatim, trusted -> ok', async () => {
+    const ok = await checkCodexTrust(withTrust(TRUST_OK));
+    assert.equal(ok.ok, true);
+    assert.equal(ok.detail, TRUST_OK.detail);
+    assert.equal(ok.fix, undefined);
+  });
+
+  test('codex trust: untrusted / modified / disabled -> problem with the adapter detail verbatim and no fix action', async () => {
+    for (const t of [TRUST_UNTRUSTED, TRUST_MODIFIED, TRUST_DISABLED]) {
+      const c = await checkCodexTrust(withTrust(t));
+      assert.equal(c.name, 'Codex trusts the ExplainIT hook');
+      assert.equal(c.ok, false);
+      assert.equal(c.detail, t.detail, 'the adapter detail carries the trust steps and must not be reworded');
+      assert.equal(c.fix, undefined, 'only the person can trust a hook inside codex');
+    }
+    const u = await checkCodexTrust(withTrust(TRUST_UNTRUSTED));
+    assert.ok(u.detail.includes('open codex in a terminal once'));
+    assert.ok(u.detail.includes('choose Trust'));
+    assert.ok(u.detail.includes('/hooks'));
+    assert.ok(u.detail.includes('Codex VS Code extension uses the same trust record'));
+  });
+
+  test('codex trust: "Trust unknown — run the Doctor after starting codex once" is surfaced as is, with no fix action', async () => {
+    const c = await checkCodexTrust(withTrust(TRUST_UNKNOWN));
+    assert.equal(c.ok, false);
+    assert.equal(c.detail, TRUST_UNKNOWN.detail);
+    assert.equal(c.fix, undefined);
+    assert.ok(c.detail.startsWith('Trust unknown'));
+  });
+
+  test('codex trust: absent -> ok; not installed -> install fix naming hooks.json; adapter silent -> problem naming config.toml', async () => {
     const absent = await checkCodexTrust(healthyDeps({ detect: async () => [{ agent: 'codex', present: false }], adapterStates: async () => [] }));
     assert.equal(absent.ok, true);
-    const notInstalled = await checkCodexTrust(healthyDeps({ adapterStates: async () => [{ agent: 'codex', installed: false, armed: false }] }));
+    const d = healthyDeps({ adapterStates: async () => [{ agent: 'codex', installed: false, armed: false }] });
+    const notInstalled = await checkCodexTrust(d);
     assert.equal(notInstalled.ok, false);
     assert.equal(notInstalled.fix?.label, 'Install the Codex hook');
+    assert.ok(notInstalled.detail.includes('~/.codex/hooks.json'));
+    await notInstalled.fix!.run();
+    sinon.assert.calledWith(d.fixes.installHook as sinon.SinonStub, 'codex');
+    const silent = await checkCodexTrust(healthyDeps({ verifyIntegrity: async () => ({ ok: true, checks: [{ name: 'Codex hook script', ok: true }] }) }));
+    assert.equal(silent.ok, false);
+    assert.equal(silent.fix, undefined);
+    assert.ok(silent.detail.includes('~/.codex/config.toml'));
+    assert.ok(silent.detail.includes('Trust'));
+  });
+
+  test('codex trust: the paths shown honour CODEX_HOME (they come from the glue, never a hard-coded ~/.codex)', async () => {
+    const paths = { hooksJson: '/srv/codex-home/hooks.json', configToml: '/srv/codex-home/config.toml' };
+    const notInstalled = await checkCodexTrust(healthyDeps({ codexPaths: paths, adapterStates: async () => [{ agent: 'codex', installed: false, armed: false }] }));
+    assert.ok(notInstalled.detail.includes('/srv/codex-home/hooks.json'));
+    assert.ok(!notInstalled.detail.includes('~/.codex'));
+    const silent = await checkCodexTrust(healthyDeps({ codexPaths: paths, verifyIntegrity: async () => ({ ok: true, checks: [] }) }));
+    assert.ok(silent.detail.includes('/srv/codex-home/config.toml'));
+  });
+
+  test('codex trust failure does not turn "Codex checkpoint hook" into a re-arm problem', async () => {
+    const [claude, codex] = await checkHookIntegrity(withTrust(TRUST_UNTRUSTED));
+    assert.equal(claude.ok, true);
+    assert.equal(codex.ok, true, codex.detail);
+    assert.equal(codex.fix, undefined);
+    assert.ok(!codex.detail.includes('trust'));
+  });
+
+  test('a full report with an untrusted Codex hook is not ok, offers nothing to "Fix all" for it, and keeps every other check green', async () => {
+    const r = await runDoctorChecks(withTrust(TRUST_UNTRUSTED));
+    assert.equal(r.ok, false);
+    const trust = r.checks.find((c) => c.name === 'Codex trusts the ExplainIT hook')!;
+    assert.equal(trust.ok, false);
+    assert.equal(trust.fix, undefined);
+    assert.equal(trust.detail, TRUST_UNTRUSTED.detail);
+    assert.deepEqual(r.checks.filter((c) => !c.ok).map((c) => c.name), ['Codex trusts the ExplainIT hook']);
+    const fixed = await applyAllFixes(r);
+    assert.deepEqual(fixed.applied, []);
+    assert.deepEqual(fixed.failed, []);
+  });
+
+  test('hook integrity: a failure the adapter marks fixable=false (config not valid JSON) gets no re-arm action', async () => {
+    const d = healthyDeps({
+      verifyIntegrity: async () => ({
+        ok: false,
+        checks: [{ name: '~/.codex/hooks.json', ok: false, fixable: false, detail: '~/.codex/hooks.json is not valid JSON (Unexpected token); the assistant cannot load any hooks from it. Fix the file by hand, then run the Doctor again.' }],
+      }),
+    });
+    const [claude, codex] = await checkHookIntegrity(d);
+    assert.equal(claude.ok, true);
+    assert.equal(codex.ok, false);
+    assert.equal(codex.fix, undefined);
+    assert.ok(codex.detail.includes('not valid JSON'));
+    assert.ok(codex.detail.includes('cannot fix this by itself'));
+  });
+
+  test('assistant details that carry a revoked Codex sign-in get the "codex login" hint', async () => {
+    const d = healthyDeps({
+      detect: async () => [{ agent: 'codex', present: true, ready: false, detail: 'codex exec failed: refresh token was revoked. Please log out and sign in again.' }],
+      channels: async () => [{ channel: 'codex', available: false, reason: 'Please log out and sign in again' }],
+    });
+    const a = await checkAssistants(d);
+    assert.ok(a.detail.includes('codex login'), a.detail);
+    const ch = await checkChannels(d);
+    assert.ok(ch.detail.includes('codex login'), ch.detail);
+    const clean = await checkAssistants(healthyDeps());
+    assert.ok(!clean.detail.includes('codex login'));
   });
 
   test('hook wiring: answered -> ok; no answer -> re-arm fix; no folder -> skipped', async () => {

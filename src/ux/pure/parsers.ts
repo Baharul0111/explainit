@@ -1,43 +1,95 @@
 /**
  * Small pure parsers used by the doctor and onboarding. No `vscode` import.
  */
+import * as path from 'node:path';
+import type { IntegrityReport } from '../../core/interfaces';
 
-/** Result of reading the Codex user config for the ExplainIT hook trust record. */
-export type CodexTrust = 'trusted' | 'untrusted' | 'no-config' | 'no-record';
+// ---------------------------------------------------------------------------------------------
+// Codex hook trust (reported by src/adapters/codex.ts as an integrity check)
+// ---------------------------------------------------------------------------------------------
+
+/** The integrity check name the Codex adapter uses for its hook-trust verdict. */
+export const CODEX_TRUST_CHECK_NAME = 'Codex hook trust';
+/** The adapter starts its detail with this when it cannot tell whether the hook is trusted. */
+export const CODEX_TRUST_UNKNOWN_PREFIX = 'Trust unknown';
+
+export function isCodexTrustCheck(name: string): boolean {
+  return name.trim().toLowerCase() === CODEX_TRUST_CHECK_NAME.toLowerCase();
+}
+
+export type CodexTrustStatus = 'trusted' | 'not-trusted' | 'unknown' | 'not-reported';
+
+export interface CodexTrustVerdict {
+  status: CodexTrustStatus;
+  /** The adapter's detail, verbatim (it carries the trust instructions). Empty when not reported. */
+  detail: string;
+}
 
 /**
- * Codex records hook approvals in `~/.codex/config.toml` under `[hooks.state]` (shared by the CLI and the
- * VS Code extension). The exact key format has changed between Codex versions, so this is deliberately
- * lenient: any key/value line inside a `hooks.state` section that mentions the ExplainIT hook and is not
- * explicitly false/denied counts as trusted.
+ * Reads the Codex adapter's "Codex hook trust" check out of an integrity report. The adapter reproduces
+ * Codex's own trust hash, so the Doctor never re-parses config.toml itself: it shows the adapter's verdict
+ * and detail verbatim. None of the failing states can be fixed by ExplainIT (the person has to trust the
+ * hook inside codex), so callers offer no fix action for any of them.
  */
-export function codexHookTrust(configToml: string | undefined, marker = 'explainit'): CodexTrust {
-  if (configToml === undefined) return 'no-config';
-  const lines = configToml.replace(/\r\n?/g, '\n').split('\n');
-  let inState = false;
-  let sawStateSection = false;
-  let sawRecord = false;
-  const m = marker.toLowerCase();
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    const header = /^\[+\s*([^\]]+?)\s*\]+$/.exec(line);
-    if (header) {
-      const name = header[1].replace(/["']/g, '').toLowerCase();
-      inState = name === 'hooks.state' || name.startsWith('hooks.state.');
-      if (inState) sawStateSection = true;
-      continue;
-    }
-    if (!inState) continue;
-    if (!line.toLowerCase().includes(m)) continue;
-    sawRecord = true;
-    const value = line.split('=').slice(1).join('=').trim().toLowerCase();
-    if (/\b(false|denied|deny|untrusted|rejected)\b/.test(value)) return 'untrusted';
-    return 'trusted';
-  }
-  if (!sawStateSection) return 'no-record';
-  return sawRecord ? 'trusted' : 'no-record';
+export function codexTrustFromIntegrity(report: Pick<IntegrityReport, 'checks'> | undefined): CodexTrustVerdict {
+  const c = report?.checks?.find((x) => x && typeof x.name === 'string' && isCodexTrustCheck(x.name));
+  if (!c) return { status: 'not-reported', detail: '' };
+  const detail = (c.detail ?? '').trim();
+  if (c.ok) return { status: 'trusted', detail: detail || 'Codex trusts the ExplainIT hook.' };
+  if (detail.startsWith(CODEX_TRUST_UNKNOWN_PREFIX)) return { status: 'unknown', detail };
+  return { status: 'not-trusted', detail: detail || 'Codex has not trusted the ExplainIT hook yet.' };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Codex home (mirrors src/adapters/installer.ts userHomeDir + codexHomeOverride and codex.ts codexHomeDir)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Where the assistants' user-layer config lives, the way the adapters decide it: `EXPLAINIT_USER_HOME`
+ * wins; in test mode without an override it is a folder inside the ExplainIT home; else the real home.
+ */
+export function userHomeDir(env: NodeJS.ProcessEnv, realHome: string, explainitHome: string): string {
+  const override = env.EXPLAINIT_USER_HOME;
+  if (override && override.trim()) return path.resolve(override.trim());
+  if (env.EXPLAINIT_TEST_MODE === '1') return path.join(explainitHome, 'user-home');
+  return realHome;
+}
+
+/**
+ * Codex keeps hooks.json, config.toml and auth.json under `CODEX_HOME` when that is set (the CLI and the
+ * VS Code extension both honour it), else under `<user home>/.codex`. Like the adapters, `CODEX_HOME` is
+ * honoured only for the real user home so test homes never point at the person's real Codex files.
+ */
+export function codexHomeDir(env: NodeJS.ProcessEnv, realHome: string, explainitHome: string): string {
+  const userHome = userHomeDir(env, realHome, explainitHome);
+  const raw = env.CODEX_HOME;
+  if (raw && raw.trim() && userHome === realHome) return path.resolve(raw.trim());
+  return path.join(userHome, '.codex');
+}
+
+/** `~/.codex/config.toml` style display for paths under the home folder; other paths are shown as they are. */
+export function friendlyHomePath(p: string, homedir: string): string {
+  const rel = path.relative(homedir, p);
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `~${path.sep}${rel}` : p;
+}
+
+/** Display strings for the two Codex files the Doctor and the status view talk about. */
+export interface CodexPaths {
+  hooksJson: string;
+  configToml: string;
+}
+
+export function codexPathsFor(env: NodeJS.ProcessEnv, realHome: string, explainitHome: string): CodexPaths {
+  const home = codexHomeDir(env, realHome, explainitHome);
+  return {
+    hooksJson: friendlyHomePath(path.join(home, 'hooks.json'), realHome),
+    configToml: friendlyHomePath(path.join(home, 'config.toml'), realHome),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// git exclude / instruction sections
+// ---------------------------------------------------------------------------------------------
 
 /** True when a `.git/info/exclude` (or .gitignore) text already ignores `*_explain.txt`. */
 export function hasTwinExclude(text: string | undefined): boolean {
@@ -60,22 +112,30 @@ export function instructionSectionPresent(fileText: string | undefined, sectionT
   return /<!--\s*explainit[:\s-]/i.test(file) || /^#+\s+ExplainIT\b/im.test(file);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Hook wiring live test
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The line a twin carries when its source file has no functions. Owned by src/twin/pure/render.ts and
+ * pinned in docs/dev/CONTRACTS.md ("Twin file contract"); mirrored here because ux may not import twin.
+ */
+export const TWIN_NO_FUNCTIONS_LINE = 'This file has no functions to explain.';
+
 /**
  * The Claude-shaped PreToolUse payload the doctor sends through the hook script to prove the wire works.
- * The content is a valid twin with one section: the gate auto-allows valid twin writes (and denies twins
- * without sections), so a healthy wire answers "allow" without any human involved. Nothing is written.
+ * The doctor runs the script with `--agent claude` on purpose: under Claude hook semantics every answer
+ * (allow, deny, ask) is printed, whereas under `--agent codex` a bare allow prints nothing, which would be
+ * indistinguishable from "no checkpoint found". The content is exactly the twin a file with no functions
+ * renders to (header two lines, a blank line, the "no functions" line): a valid twin the checkpoint can
+ * answer without a human. Nothing is written to disk.
  */
 export function syntheticWritePayload(folder: string, targetPath: string, sourceName: string): Record<string, unknown> {
   const content =
     `ExplainIT — plain-English twin of ${sourceName}\n` +
     'Written by ExplainIT. Not committed to git. Right-click a section for "Regenerate this section".\n' +
     '\n' +
-    '1. doctor_probe\n' +
-    'What it does: Proves that the ExplainIT hook can reach the checkpoint in this window.\n' +
-    'How it works:\n' +
-    '- The Doctor sends this synthetic write through the real hook script.\n' +
-    '- The checkpoint recognises a valid twin and answers without asking anyone.\n' +
-    '- Nothing is written to disk.\n';
+    `${TWIN_NO_FUNCTIONS_LINE}\n`;
   return {
     session_id: 'explainit-doctor',
     transcript_path: '',

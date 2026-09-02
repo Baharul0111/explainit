@@ -13,7 +13,7 @@ import type { Logger } from '../../core/log';
 import type { Settings } from '../../core/settings';
 import type { ChannelAvailability } from '../../core/types';
 import { explainitHome } from '../../core/paths';
-import { cliWorkDir, probeVersion, resolveCli, runCli, type CliSpec, type ResolveOptions } from './cli';
+import { SIGN_IN_MESSAGE, cliWorkDir, probeVersion, resolveCli, runCli, type CliSpec, type ResolveOptions } from './cli';
 import { ChannelError, type ChannelFailure, type ChannelRequest, type ChannelResult, type GenerationChannel } from './types';
 
 export interface CliChannelDeps {
@@ -32,10 +32,22 @@ export function claudeArgs(stream: boolean): string[] {
   return stream ? [...CLAUDE_BASE_ARGS, '--output-format', 'stream-json', '--include-partial-messages', '--verbose'] : [...CLAUDE_BASE_ARGS, '--output-format', 'json'];
 }
 
+/**
+ * Signed-out output, as the real CLIs print it:
+ *   claude: "Not logged in · Please run /login", API errors with "authentication_error"
+ *   codex:  "refresh token was revoked", "Please log out and sign in again", "token_revoked", "401 Unauthorized"
+ */
+const SIGNED_OUT_RE = /not logged in|please (run )?\/?login|log in|sign in|authenticat|api key|unauthori[sz]ed|credential|oauth|token has expired|token.{0,24}revoked|token_revoked|\brevoked\b|invalid.*key/;
+
+/** True when the CLI's output says the person is not signed in (or the stored sign-in no longer works). */
+export function looksSignedOut(text: string): boolean {
+  return SIGNED_OUT_RE.test(text.toLowerCase());
+}
+
 /** Classify an error message from the CLI into a ChannelFailure. */
 export function classifyCliFailure(text: string): ChannelFailure {
   const t = text.toLowerCase();
-  if (/not logged in|please (run )?\/?login|log in|sign in|authenticat|api key|unauthori[sz]ed|credential|oauth|token has expired|invalid.*key/.test(t)) return 'auth';
+  if (SIGNED_OUT_RE.test(t)) return 'auth';
   if (/rate.?limit|quota|usage limit|limit reached|too many requests|overloaded|out of credits|insufficient credits|429|529|exceeded/.test(t)) return 'quota';
   return 'failed';
 }
@@ -160,7 +172,7 @@ export function createClaudeChannel(deps: CliChannelDeps): GenerationChannel {
         const msg = (parsed.result ?? (r.stdout.trim() ? parsed.detail : '') ?? '').trim().slice(0, 500) || r.stderr.trim().slice(0, 500);
         let reason: ChannelFailure = classifyCliFailure(msg + ' ' + r.stderr);
         if (reason === 'failed' && r.code !== 0) reason = 'bad-output';
-        log.warn('claude failed', { reason, code: r.code, detail: msg.slice(0, 200) });
+        log.warn('claude failed', { reason, code: r.code, detail: (msg || r.stderr.trim()).slice(0, 200) });
         throw new ChannelError('claude', reason, describeFailure('Claude Code', reason, msg, r.code));
       }
       if (!parsed.result.trim()) throw new ChannelError('claude', 'bad-output', 'Claude Code answered with an empty reply. Try again, or pick another assistant in the ExplainIT settings.');
@@ -170,12 +182,15 @@ export function createClaudeChannel(deps: CliChannelDeps): GenerationChannel {
   };
 }
 
-/** Plain-English failure text: what happened and what to do next. */
+/**
+ * Plain-English failure text: what happened and what to do next. The sign-in message is fixed
+ * (no raw CLI text) because the twin, the status view and the Doctor show it verbatim.
+ */
 export function describeFailure(tool: string, reason: ChannelFailure, msg: string, code: number | null): string {
   const tail = msg ? ` (${msg.replace(/\s+/g, ' ').slice(0, 200)})` : '';
   switch (reason) {
     case 'auth':
-      return `${tool} is not signed in${tail}. Run "${tool.toLowerCase().includes('claude') ? 'claude' : 'codex'} login" in a terminal, then try again.`;
+      return SIGN_IN_MESSAGE[tool.toLowerCase().includes('claude') ? 'claude' : 'codex'];
     case 'quota':
       return `${tool} reported a usage limit${tail}. Wait for the limit to reset or pick another assistant in the ExplainIT settings.`;
     case 'bad-output':

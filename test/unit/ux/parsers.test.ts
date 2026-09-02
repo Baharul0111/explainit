@@ -1,35 +1,109 @@
 import * as assert from 'node:assert/strict';
-import { codexHookTrust, hasTwinExclude, instructionSectionPresent, interpretHookOutput, parseTestAnswers, parseSessionFile, syntheticWritePayload, formatBytes, isTestMode, HOOK_OUTPUT_CAP } from '../../../src/ux/pure/parsers';
+import * as path from 'node:path';
+import {
+  codexHomeDir,
+  codexPathsFor,
+  codexTrustFromIntegrity,
+  friendlyHomePath,
+  hasTwinExclude,
+  instructionSectionPresent,
+  interpretHookOutput,
+  isCodexTrustCheck,
+  parseTestAnswers,
+  parseSessionFile,
+  syntheticWritePayload,
+  formatBytes,
+  isTestMode,
+  userHomeDir,
+  CODEX_TRUST_CHECK_NAME,
+  HOOK_OUTPUT_CAP,
+  TWIN_NO_FUNCTIONS_LINE,
+} from '../../../src/ux/pure/parsers';
 import { shortFolder } from '../../../src/ux/pure/doctorChecks';
 import { detectionLines, renderDoctorMarkdown, renderJournalMarkdown, INSTALL_LINKS } from '../../../src/ux/pure/render';
 import type { DoctorReport } from '../../../src/core/interfaces';
 
 suite('ux/pure/parsers', () => {
-  suite('codexHookTrust', () => {
-    test('no config file', () => assert.equal(codexHookTrust(undefined), 'no-config'));
-    test('config without a hooks.state section', () => assert.equal(codexHookTrust('[features]\nhooks = true\n'), 'no-record'));
-    test('trusted record', () => {
-      const toml = '[features]\nhooks = true\n\n[hooks.state]\n"~/.explainit/hooks/explainit-hook.sh --agent codex" = "trusted"\n';
-      assert.equal(codexHookTrust(toml), 'trusted');
+  suite('codexTrustFromIntegrity (exact shapes from src/adapters/codex.ts)', () => {
+    const STEP =
+      'Codex only runs hooks you have trusted: open codex in a terminal once, and when it shows the ExplainIT hook choose Trust (or type /hooks). The Codex VS Code extension uses the same trust record.';
+    test('the adapter check name is "Codex hook trust"', () => {
+      assert.equal(CODEX_TRUST_CHECK_NAME, 'Codex hook trust');
+      assert.equal(isCodexTrustCheck('Codex hook trust'), true);
+      assert.equal(isCodexTrustCheck('  codex hook trust '), true);
+      assert.equal(isCodexTrustCheck('Codex hook script'), false);
+      assert.equal(isCodexTrustCheck('Codex hook'), false);
     });
-    test('nested state table and windows line endings', () => {
-      const toml = '[hooks.state."abc123"]\r\ncommand = "C:\\\\Users\\\\me\\\\.explainit\\\\hooks\\\\explainit-hook.cmd --agent codex"\r\ntrusted = true\r\n';
-      assert.equal(codexHookTrust(toml), 'trusted');
+    test('trusted', () => {
+      const v = codexTrustFromIntegrity({ checks: [{ name: 'Codex hook trust', ok: true, detail: 'Codex trusts the ExplainIT hook.' }] });
+      assert.deepEqual(v, { status: 'trusted', detail: 'Codex trusts the ExplainIT hook.' });
     });
-    test('explicitly untrusted', () => {
-      assert.equal(codexHookTrust('[hooks.state]\n"explainit-hook.sh" = "denied"\n'), 'untrusted');
-      assert.equal(codexHookTrust('[hooks.state]\nexplainit = false\n'), 'untrusted');
+    test('untrusted, modified and disabled are "not-trusted" with the detail kept verbatim', () => {
+      const details = [
+        `Codex has no trust record for the ExplainIT hook yet. ${STEP}`,
+        `Codex has a trust record for the ExplainIT hook, but it does not match the current hook entry. Codex will not run it until you trust it again. ${STEP}`,
+        'The ExplainIT hook is disabled in Codex (enabled = false in config.toml). Enable it in codex with /hooks.',
+      ];
+      for (const detail of details) {
+        const v = codexTrustFromIntegrity({ checks: [{ name: 'Codex hook script', ok: true }, { name: 'Codex hook trust', ok: false, fixable: false, detail }] });
+        assert.equal(v.status, 'not-trusted');
+        assert.equal(v.detail, detail);
+      }
     });
-    test('empty or whitespace-only config is "no record", never a crash', () => {
-      assert.equal(codexHookTrust(''), 'no-record');
-      assert.equal(codexHookTrust('   \n\n'), 'no-record');
-      assert.equal(codexHookTrust('[hooks.state]\n'), 'no-record');
+    test('"Trust unknown — run the Doctor after starting codex once." is "unknown"', () => {
+      const detail = 'Trust unknown — run the Doctor after starting codex once. (hooks.json could not be read. Config: ~/.codex/config.toml)';
+      const v = codexTrustFromIntegrity({ checks: [{ name: 'Codex hook trust', ok: false, fixable: false, detail }] });
+      assert.equal(v.status, 'unknown');
+      assert.equal(v.detail, detail);
     });
-    test('state section without an ExplainIT record', () => {
-      assert.equal(codexHookTrust('[hooks.state]\n"other-hook" = "trusted"\n'), 'no-record');
+    test('no trust check in the report (Codex not installed, adapter crashed) -> not-reported', () => {
+      assert.equal(codexTrustFromIntegrity({ checks: [] }).status, 'not-reported');
+      assert.equal(codexTrustFromIntegrity({ checks: [{ name: 'Codex hook', ok: true, detail: 'Not connected.' }] }).status, 'not-reported');
+      assert.equal(codexTrustFromIntegrity(undefined).status, 'not-reported');
     });
-    test('mentions outside the state section do not count', () => {
-      assert.equal(codexHookTrust('[hooks]\ncommand = "explainit-hook.sh"\n'), 'no-record');
+    test('an empty detail never yields "undefined"', () => {
+      assert.equal(codexTrustFromIntegrity({ checks: [{ name: 'Codex hook trust', ok: true }] }).detail, 'Codex trusts the ExplainIT hook.');
+      const v = codexTrustFromIntegrity({ checks: [{ name: 'Codex hook trust', ok: false, fixable: false }] });
+      assert.equal(v.status, 'not-trusted');
+      assert.ok(v.detail.length > 10 && !v.detail.includes('undefined'));
+    });
+  });
+
+  suite('codexHomeDir / userHomeDir / friendlyHomePath (mirror the adapters)', () => {
+    const home = path.join(path.sep, 'home', 'me');
+    const eh = path.join(home, '.explainit');
+    test('default: <home>/.codex', () => {
+      assert.equal(codexHomeDir({}, home, eh), path.join(home, '.codex'));
+      assert.equal(userHomeDir({}, home, eh), home);
+    });
+    test('CODEX_HOME wins for the real home', () => {
+      const custom = path.join(path.sep, 'srv', 'codex-home');
+      assert.equal(codexHomeDir({ CODEX_HOME: custom }, home, eh), custom);
+      assert.equal(codexHomeDir({ CODEX_HOME: `  ${custom}  ` }, home, eh), custom);
+    });
+    test('blank CODEX_HOME is ignored', () => {
+      assert.equal(codexHomeDir({ CODEX_HOME: '   ' }, home, eh), path.join(home, '.codex'));
+    });
+    test('test homes ignore CODEX_HOME like the adapters do (never point tests at the real Codex files)', () => {
+      const custom = path.join(path.sep, 'srv', 'codex-home');
+      assert.equal(codexHomeDir({ CODEX_HOME: custom, EXPLAINIT_TEST_MODE: '1' }, home, eh), path.join(eh, 'user-home', '.codex'));
+      const override = path.join(path.sep, 'tmp', 'fake-home');
+      assert.equal(codexHomeDir({ CODEX_HOME: custom, EXPLAINIT_USER_HOME: override }, home, eh), path.join(override, '.codex'));
+      assert.equal(userHomeDir({ EXPLAINIT_USER_HOME: override }, home, eh), override);
+    });
+    test('friendlyHomePath shows ~ for paths under the home folder and leaves others alone', () => {
+      assert.equal(friendlyHomePath(path.join(home, '.codex', 'config.toml'), home), `~${path.sep}${path.join('.codex', 'config.toml')}`);
+      const other = path.join(path.sep, 'srv', 'codex-home', 'hooks.json');
+      assert.equal(friendlyHomePath(other, home), other);
+    });
+    test('codexPathsFor names both files, honouring CODEX_HOME', () => {
+      const p = codexPathsFor({}, home, eh);
+      assert.equal(p.hooksJson, `~${path.sep}${path.join('.codex', 'hooks.json')}`);
+      assert.equal(p.configToml, `~${path.sep}${path.join('.codex', 'config.toml')}`);
+      const custom = path.join(path.sep, 'srv', 'codex-home');
+      const q = codexPathsFor({ CODEX_HOME: custom }, home, eh);
+      assert.equal(q.hooksJson, path.join(custom, 'hooks.json'));
+      assert.equal(q.configToml, path.join(custom, 'config.toml'));
     });
   });
 
@@ -56,23 +130,28 @@ suite('ux/pure/parsers', () => {
   });
 
   suite('syntheticWritePayload', () => {
-    test('is a Claude-shaped PreToolUse Write of a valid twin', () => {
+    test('is a Claude-shaped PreToolUse Write (the doctor runs the hook as --agent claude)', () => {
       const p = syntheticWritePayload('/ws', '/ws/probe_explain.txt', 'probe.py') as any;
       assert.equal(p.tool_name, 'Write');
       assert.equal(p.hook_event_name, 'PreToolUse');
       assert.equal(p.cwd, '/ws');
+      assert.equal(typeof p.session_id, 'string');
       assert.equal(p.tool_input.file_path, '/ws/probe_explain.txt');
+      assert.ok(p.tool_input.file_path.endsWith('_explain.txt'), 'must be a twin path so the checkpoint answers by itself');
+    });
+    test('content is exactly the CONTRACTS twin for a file with no functions: header two lines, blank, the no-functions line', () => {
+      const p = syntheticWritePayload('/ws', '/ws/probe_explain.txt', 'probe.py') as any;
+      assert.equal(
+        p.tool_input.content,
+        'ExplainIT — plain-English twin of probe.py\n' +
+          'Written by ExplainIT. Not committed to git. Right-click a section for "Regenerate this section".\n' +
+          '\n' +
+          'This file has no functions to explain.\n',
+      );
+      assert.equal(TWIN_NO_FUNCTIONS_LINE, 'This file has no functions to explain.');
       const lines = p.tool_input.content.split('\n');
-      assert.equal(lines[0], 'ExplainIT — plain-English twin of probe.py');
-      assert.ok(lines[1].startsWith('Written by ExplainIT.'));
-      assert.equal(lines[2], '');
-      // One real section: the gate only auto-allows twins that parse to at least one section.
-      assert.match(lines[3], /^1\. \S+$/);
-      assert.ok(lines[4].startsWith('What it does: '));
-      assert.equal(lines[5], 'How it works:');
-      const steps = lines.slice(6).filter((l: string) => l.startsWith('- '));
-      assert.ok(steps.length >= 2 && steps.length <= 5, `steps: ${steps.length}`);
-      assert.ok(p.tool_input.content.endsWith('\n'));
+      assert.equal(lines.length, 5, 'four lines plus the final newline');
+      assert.ok(!lines.some((l: string) => /^\d+\. /.test(l)), 'no numbered sections');
     });
     test('windows-style paths pass through untouched', () => {
       const p = syntheticWritePayload('C:\\ws\\proj', 'C:\\ws\\proj\\probe_explain.txt', 'probe.py') as any;

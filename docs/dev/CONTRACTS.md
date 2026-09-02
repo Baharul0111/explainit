@@ -283,3 +283,13 @@ watcher and twin staleness logic that a write was gate-approved.
   `-c hooks.PreToolUse=[...]` session flags together with `--dangerously-bypass-hook-trust`.
 - Hook trust: Codex records `[hooks.state."<key>"] trusted_hash = "sha256:..."` in `config.toml`; `src/adapters/pure/codexTrust.ts`
   reproduces the hash byte-for-byte (pinned fixture), so the Doctor can say trusted / modified / untrusted.
+
+## Protected-config rule shared by the gate and the hook mirror (post-review clarification)
+
+- `.claude/settings.json|settings.local.json` and `.codex/hooks.json|config.toml` are matched by parent-folder name at any
+  depth, plus `$CODEX_HOME/hooks.json|config.toml` when `CODEX_HOME` is set.
+- Partial edits (Edit/MultiEdit/apply_patch update) are replayed onto the current file first; the comparison is always on
+  the FULL before/after content: parsed `hooks` objects for the JSON files; for `config.toml`, in file order, every line
+  matching `hooks|explainit|trusted_hash|sha256:|enabled =` plus every line inside `[features]` and `[hooks*]` tables.
+  Unparseable proposed JSON/TOML -> deny. Any partial edit of `hooks.json` is a hooks change even if only formatting changed.
+- Shell-command mentions of protected paths are checked case-insensitively on every platform.

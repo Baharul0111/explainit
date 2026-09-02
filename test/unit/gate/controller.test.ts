@@ -400,6 +400,138 @@ suite('gate/controller', () => {
   });
 });
 
+suite('gate/controller: protected config files (hook script parity)', () => {
+  let h: Harness;
+  let c: GateController;
+  const decision = (verdict: Decision['verdict'], extra: Partial<Decision> = {}): Decision => ({ requestId: '', verdict, scope: 'one', decidedAt: new Date().toISOString(), ...extra });
+
+  const CMD = '/x/hooks/explainit-hook.sh --agent claude';
+  const MATCHER = 'Write|Edit|MultiEdit|NotebookEdit|Bash';
+  const PRE_ENTRY = `      { "matcher": "${MATCHER}", "hooks": [{ "type": "command", "command": "${CMD}", "timeout": 7200 }] }\n`;
+  const POST_ENTRY = `      { "matcher": "${MATCHER}", "hooks": [{ "type": "command", "command": "${CMD} --event PostToolUse", "timeout": 10 }] }\n`;
+  const SETTINGS = `{\n  "model": "opus",\n  "hooks": {\n    "PreToolUse": [\n${PRE_ENTRY}    ],\n    "PostToolUse": [\n${POST_ENTRY}    ]\n  },\n  "theme": "dark"\n}\n`;
+  const TOML = ['model = "gpt-5"', '', '[features]', 'hooks = true', '', '[hooks.state."abc"]', 'trusted_hash = "sha256:1111"', '', '[tui]', 'theme = "dark"', ''].join('\n');
+  const HOOKS_JSON = '{"hooks": {"PreToolUse": [{"matcher": "apply_patch", "hooks": [{"type": "command", "command": "/x/hooks/explainit-hook.sh --agent codex"}]}]}}\n';
+
+  const write = (p: string, text: string): string => {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text);
+    return p;
+  };
+
+  setup(() => {
+    h = makeHarness();
+    c = new GateController(h.deps);
+  });
+  teardown(() => h.cleanup());
+
+  test('Edit that swaps "--agent claude" for "--agent x" inside our hook entry -> deny', async () => {
+    const settings = write(path.join(h.userHome, '.claude', 'settings.json'), SETTINGS);
+    const d = await c.handle(claudeEnvelope('Edit', { file_path: settings, old_string: '--agent claude"', new_string: '--agent x"' }, h.workspace));
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /hooks/);
+    assert.equal(h.review.requests.length, 0);
+    assert.equal(fs.readFileSync(settings, 'utf8'), SETTINGS, 'nothing written');
+  });
+
+  test('Edit that changes an unrelated setting in settings.json goes through to the normal flow', async () => {
+    // Project layer inside the workspace: reviewed like any other file and allowed on accept.
+    const project = write(path.join(h.workspace, '.claude', 'settings.json'), SETTINGS);
+    h.setReview(() => decision('accept'));
+    const d = await c.handle(claudeEnvelope('Edit', { file_path: project, old_string: '"theme": "dark"', new_string: '"theme": "light"' }, h.workspace));
+    assert.deepEqual(d, { permissionDecision: 'allow' });
+    assert.equal(h.review.requests.length, 1);
+    assert.equal(h.review.requests[0].writes[0].after, SETTINGS.replace('"theme": "dark"', '"theme": "light"'));
+    // User layer lives outside the workspace: not protected for this change, so the agent's own flow.
+    const user = write(path.join(h.userHome, '.claude', 'settings.json'), SETTINGS);
+    const u = await c.handle(claudeEnvelope('Edit', { file_path: user, old_string: '"theme": "dark"', new_string: '"theme": "light"' }, h.workspace));
+    assert.deepEqual(u, { permissionDecision: 'none' });
+    assert.equal(h.review.requests.length, 1, 'no review for a file outside the workspace');
+  });
+
+  test('MultiEdit that removes our entry -> deny, even when another edit in the batch is harmless', async () => {
+    const settings = write(path.join(h.workspace, '.claude', 'settings.json'), SETTINGS);
+    h.setReview(() => decision('accept'));
+    const d = await c.handle(
+      claudeEnvelope(
+        'MultiEdit',
+        {
+          file_path: settings,
+          edits: [
+            { old_string: '"theme": "dark"', new_string: '"theme": "light"' },
+            { old_string: PRE_ENTRY, new_string: '' },
+          ],
+        },
+        h.workspace,
+      ),
+    );
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /hooks/);
+    assert.equal(h.review.requests.length, 0);
+  });
+
+  test('Edit that leaves settings.json unparseable -> deny (hooks cannot be verified)', async () => {
+    const settings = write(path.join(h.workspace, '.claude', 'settings.json'), SETTINGS);
+    const d = await c.handle(claudeEnvelope('Edit', { file_path: settings, old_string: '"timeout": 7200', new_string: '"timeout": 7200,' }, h.workspace));
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /not valid JSON/);
+  });
+
+  test('config.toml edit that changes trusted_hash -> deny; theme change is not a hooks change', async () => {
+    const toml = write(path.join(h.userHome, '.codex', 'config.toml'), TOML);
+    const d = await c.handle(codexEnvelope('Edit', { file_path: toml, old_string: 'sha256:1111', new_string: 'sha256:9999' }, h.workspace));
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /hook/);
+    const flag = await c.handle(claudeEnvelope('Edit', { file_path: toml, old_string: 'hooks = true', new_string: 'hooks = false' }, h.workspace));
+    assert.equal(flag.permissionDecision, 'deny');
+    const ok = await c.handle(codexEnvelope('Edit', { file_path: toml, old_string: 'theme = "dark"', new_string: 'theme = "light"' }, h.workspace));
+    assert.deepEqual(ok, { permissionDecision: 'none' }, 'outside the workspace and not a hooks change: agent flow');
+    const garbage = await c.handle(codexEnvelope('Write', { file_path: toml, content: 'this is not toml\n' }, h.workspace));
+    assert.equal(garbage.permissionDecision, 'deny');
+    assert.match(garbage.reason!, /cannot be parsed/);
+  });
+
+  test('CODEX_HOME set: hooks.json and config.toml are resolved under it', async () => {
+    const codexHome = path.join(h.root, 'codex-home');
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    try {
+      const hooksJson = write(path.join(codexHome, 'hooks.json'), HOOKS_JSON);
+      const toml = write(path.join(codexHome, 'config.toml'), TOML);
+      // A whitespace-only partial edit of hooks.json is still a hooks change.
+      const ws = await c.handle(codexEnvelope('Edit', { file_path: hooksJson, old_string: '"PreToolUse": [', new_string: '"PreToolUse":  [' }, h.workspace));
+      assert.equal(ws.permissionDecision, 'deny');
+      assert.match(ws.reason!, /nothing but hooks/);
+      const swap = await c.handle(codexEnvelope('Edit', { file_path: hooksJson, old_string: '--agent codex', new_string: '--agent x' }, h.workspace));
+      assert.equal(swap.permissionDecision, 'deny');
+      const trust = await c.handle(codexEnvelope('Edit', { file_path: toml, old_string: 'sha256:1111', new_string: 'sha256:9999' }, h.workspace));
+      assert.equal(trust.permissionDecision, 'deny');
+      assert.match(trust.reason!, /hook/);
+      const bad = await c.handle(codexEnvelope('Write', { file_path: hooksJson, content: '{"hooks": ' }, h.workspace));
+      assert.equal(bad.permissionDecision, 'deny');
+      const theme = await c.handle(codexEnvelope('Edit', { file_path: toml, old_string: 'theme = "dark"', new_string: 'theme = "light"' }, h.workspace));
+      assert.deepEqual(theme, { permissionDecision: 'none' });
+      const shell = await c.handle(codexEnvelope('shell', { command: ['bash', '-lc', `echo x > ${hooksJson}`] }, h.workspace));
+      assert.equal(shell.permissionDecision, 'deny');
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prev;
+    }
+    // Without CODEX_HOME that folder is an ordinary place outside the workspace.
+    const plain = await c.handle(codexEnvelope('Edit', { file_path: path.join(codexHome, 'hooks.json'), old_string: '--agent codex', new_string: '--agent x' }, h.workspace));
+    assert.deepEqual(plain, { permissionDecision: 'none' });
+  });
+
+  test('codex apply_patch update of a project .codex/hooks.json is a partial edit -> deny', async () => {
+    write(path.join(h.workspace, '.codex', 'hooks.json'), HOOKS_JSON);
+    const patch = ['*** Begin Patch', '*** Update File: .codex/hooks.json', '@@', `-${HOOKS_JSON.trimEnd()}`, `+${JSON.stringify(JSON.parse(HOOKS_JSON))}`, '*** End Patch'].join('\n');
+    const d = await c.handle(codexEnvelope('apply_patch', { command: ['apply_patch', patch] }, h.workspace));
+    assert.equal(d.permissionDecision, 'deny');
+    assert.match(d.reason!, /hooks/);
+    assert.equal(h.review.requests.length, 0);
+  });
+});
+
 suite('gate/controller: normalizeVerdict', () => {
   const decision = (verdict: Decision['verdict'], extra: Partial<Decision> = {}): Decision => ({ requestId: 'r', verdict, scope: 'one', decidedAt: '', ...extra });
   const hunk = (id: string) => ({ id, kind: 'function' as const, changeType: 'modified' as const, beforeText: 'a', afterText: 'b', trivial: false });

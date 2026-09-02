@@ -4,6 +4,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { canonicalPath, isInside, workspaceKey, explainitHome, HOME_LAYOUT, writePrivateFile } from '../../../src/core/paths';
 
+/** What canonicalPath promises for an existing path: realpath with a lower-case drive letter on Windows (VS Code's fsPath style). */
+function expectedCanonical(p: string): string {
+  const real = fs.realpathSync.native(p);
+  return process.platform === 'win32' ? real.replace(/^([a-zA-Z]):/, (_m, d: string) => d.toLowerCase() + ':') : real;
+}
+
 suite('core/paths', () => {
   let tmp: string;
   setup(() => {
@@ -14,7 +20,7 @@ suite('core/paths', () => {
   });
 
   test('canonicalPath resolves existing paths and keeps missing tails', () => {
-    const real = fs.realpathSync.native(tmp);
+    const real = expectedCanonical(tmp);
     assert.strictEqual(canonicalPath(tmp), real);
     const missing = path.join(tmp, 'a', 'b', 'c.txt');
     assert.strictEqual(canonicalPath(missing), path.join(real, 'a', 'b', 'c.txt'));
@@ -29,7 +35,7 @@ suite('core/paths', () => {
     } catch {
       this.skip();
     }
-    assert.strictEqual(canonicalPath(path.join(link, 'x.py')), path.join(fs.realpathSync.native(target), 'x.py'));
+    assert.strictEqual(canonicalPath(path.join(link, 'x.py')), path.join(expectedCanonical(target), 'x.py'));
   });
 
   test('isInside handles equality, children and escapes', () => {

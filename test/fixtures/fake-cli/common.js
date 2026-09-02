@@ -2,6 +2,7 @@
 // The fakes read the router's prompt (argument or stdin), locate the sentinel fence, and answer with
 // deterministic, well-formed JSON in the router's shape. FAKE_CLI_MODE picks the behaviour:
 //   ok (default) | garbage | injected (replies "PWNED") | slow (sleeps 5 s) | fail (exit 1)
+//   | revoked (the stored sign-in no longer works: prints what the real CLI prints, exit 1)
 'use strict';
 const fs = require('node:fs');
 
@@ -138,6 +139,15 @@ function shouldFail() {
   return MODE === 'fail';
 }
 
+/** The person is signed out (or the stored sign-in was revoked): the CLI cannot serve any request. */
+function signedOut() {
+  return MODE === 'revoked';
+}
+
+// What the real CLIs print when the stored sign-in no longer works (Claude Code 2.x, codex 0.15x).
+const CLAUDE_SIGNED_OUT = 'Not logged in · Please run /login';
+const CODEX_SIGNED_OUT = '401 Unauthorized: {"detail":"The refresh token was revoked. Please log out and sign in again.","code":"token_revoked"}';
+
 function chunks(text, size) {
   const out = [];
   for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
@@ -156,4 +166,4 @@ function writeLines(lines, delayMs) {
   });
 }
 
-module.exports = { MODE, readPrompt, parseArgv, logPrompt, findFence, findFunctions, replyFor, shouldFail, chunks, writeLines };
+module.exports = { MODE, readPrompt, parseArgv, logPrompt, findFence, findFunctions, replyFor, shouldFail, signedOut, CLAUDE_SIGNED_OUT, CODEX_SIGNED_OUT, chunks, writeLines };

@@ -13,7 +13,7 @@ import type { ChannelAvailability } from '../../core/types';
 import { explainitHome } from '../../core/paths';
 import { randomId } from '../../core/hash';
 import { classifyCliFailure, describeFailure, type CliChannelDeps } from './claude';
-import { cliWorkDir, probeVersion, resolveCli, runCli, type CliSpec } from './cli';
+import { SIGN_IN_MESSAGE, cliWorkDir, codexSignIn, probeVersion, resolveCli, runCli, type CliSpec } from './cli';
 import { ChannelError, type ChannelFailure, type ChannelRequest, type ChannelResult, type GenerationChannel } from './types';
 
 export function codexArgs(cwd: string, outFile: string, stream: boolean): string[] {
@@ -74,7 +74,13 @@ export function createCodexChannel(deps: CliChannelDeps): GenerationChannel {
       if (spec.source === 'none') return { channel: 'codex', available: false, reason: 'Codex was not found.', detail: spec.detail };
       const probe = await probeVersion(spec, 10_000);
       if (!probe.ok) return { channel: 'codex', available: false, reason: 'Codex is installed but did not answer "--version".', detail: `${spec.detail}: ${probe.detail}` };
-      return { channel: 'codex', available: true, detail: `${spec.detail}, ${probe.detail}. Sign-in is checked on first use.` };
+      // `codex login` writes auth.json under CODEX_HOME (else ~/.codex); without it every request would fail.
+      const signIn = codexSignIn(deps.resolveOptions);
+      if (!signIn.signedIn) {
+        log.info('codex is installed but not signed in', { detail: signIn.detail });
+        return { channel: 'codex', available: false, reason: SIGN_IN_MESSAGE.codex, detail: `${spec.detail}, ${probe.detail}; ${signIn.detail}.` };
+      }
+      return { channel: 'codex', available: true, detail: `${spec.detail}, ${probe.detail}; ${signIn.detail}.` };
     },
     async send(req: ChannelRequest): Promise<ChannelResult> {
       const spec = resolve();
@@ -118,7 +124,10 @@ export function createCodexChannel(deps: CliChannelDeps): GenerationChannel {
         if (!text.trim()) text = fromJson.text ?? (stream ? '' : r.stdout);
         const detail = `codex ${spec.source} ${r.durationMs}ms exit=${r.code}`;
         if (!text.trim()) {
-          const msg = (fromJson.error ?? r.stderr ?? '').trim().slice(0, 500);
+          // A revoked sign-in shows up on stderr ("refresh token was revoked", "401 Unauthorized") and,
+          // with --json, as an error event: classify on everything the CLI said.
+          const said = [fromJson.error ?? '', r.stderr].map((s) => s.trim()).filter(Boolean).join(' ');
+          const msg = said.slice(0, 500);
           const reason: ChannelFailure = msg ? classifyCliFailure(msg) : 'bad-output';
           log.warn('codex failed', { reason, code: r.code, detail: msg.slice(0, 200) });
           throw new ChannelError('codex', reason, describeFailure('Codex', reason, msg, r.code));
@@ -126,7 +135,10 @@ export function createCodexChannel(deps: CliChannelDeps): GenerationChannel {
         if (r.code !== 0 && r.code !== null) {
           // Output plus a non-zero exit: the message is probably an error report from the CLI.
           const reason = classifyCliFailure(text + ' ' + r.stderr);
-          if (reason !== 'failed') throw new ChannelError('codex', reason, describeFailure('Codex', reason, text.slice(0, 200), r.code));
+          if (reason !== 'failed') {
+            log.warn('codex failed', { reason, code: r.code, detail: (r.stderr.trim() || text).slice(0, 200) });
+            throw new ChannelError('codex', reason, describeFailure('Codex', reason, text.slice(0, 200), r.code));
+          }
         }
         return { text, detail };
       } finally {

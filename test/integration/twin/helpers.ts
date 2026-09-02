@@ -61,9 +61,20 @@ export function stubRouter(api: ExplainitApi, opts: { delayMs?: number; perFunct
     }
     return out;
   });
+  // `requests` is history too: resetting the stub's history must forget the requests seen so far.
+  const resetHistory = explain.resetHistory.bind(explain);
+  explain.resetHistory = () => {
+    requests.length = 0;
+    resetHistory();
+  };
   sandbox.stub(api.router, 'resolveChannel').resolves('claude');
   sandbox.stub(api.router, 'availableChannels').resolves([{ channel: 'claude', available: true }]);
   return { explain, requests, restore: () => sandbox.restore() };
+}
+
+/** Update an `editor.*` setting for the test user (undefined removes the override). */
+export async function setEditorSetting(key: string, value: unknown): Promise<void> {
+  await vscode.workspace.getConfiguration('editor').update(key, value, vscode.ConfigurationTarget.Global);
 }
 
 export function docLike(doc: vscode.TextDocument): TextDocumentLike {

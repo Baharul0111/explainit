@@ -32,8 +32,9 @@ export const MESSAGES = {
   copilotSteeringDone:
     'Copilot steering is in place. Copilot cannot be stopped before it writes, so ExplainIT reviews its changes after they land and adds a plain-English note to each function.',
   codexTrustStep:
-    'Start Codex once (terminal or the VS Code extension). It will ask whether to trust the ExplainIT hook. Choose "trust" so the checkpoint can stop changes before they reach the disk.',
+    'Codex only runs hooks you have trusted: open codex in a terminal once and, when it shows the ExplainIT hook, choose Trust (or type /hooks). The Codex VS Code extension uses the same trust record, so once is enough.',
   restartAgentStep: 'Restart {agent} so it picks up the new hook. Sessions that were already running are not protected until restarted.',
+  codexSignInHint: 'Codex says its sign-in has expired. Run "codex login" in a terminal (the Codex VS Code extension uses the same sign-in), then try again.',
 
   // --- explanations / twins ----------------------------------------------------------------
   explanationLoading: 'Writing the plain-English twin with {channel}... The first section usually appears within a few seconds.',
@@ -138,4 +139,17 @@ export function describeError(e: unknown): string {
   const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : 'an unknown error occurred';
   const text = raw.trim().replace(/\s+/g, ' ') || 'an unknown error occurred';
   return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+/**
+ * Codex answers with one of these when its sign-in has expired ("refresh token was revoked",
+ * "Please log out and sign in again"). The fix is `codex login`, so every message that shows such text
+ * gets the hint appended once.
+ */
+export const CODEX_SIGN_IN_PATTERN = /refresh token (was|has been) revoked|log ?out and (sign|log) in again/i;
+
+export function withSignInHint(text: string): string {
+  if (!CODEX_SIGN_IN_PATTERN.test(text) || text.includes(MESSAGES.codexSignInHint)) return text;
+  const t = text.trim();
+  return `${/[.!?]$/.test(t) ? t : `${t}.`} ${MESSAGES.codexSignInHint}`;
 }

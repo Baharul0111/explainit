@@ -18,6 +18,21 @@ export interface PolicyContext {
   folders: string[];
   /** Extra protected files (e.g. the installed hook script path). */
   extraProtected?: string[];
+  /**
+   * Where Codex keeps `hooks.json` and `config.toml`: `$CODEX_HOME` when the person set it, else
+   * `<userHome>/.codex`. The controller passes the environment value; tests pass a temp folder.
+   */
+  codexHome?: string;
+}
+
+/** Options for one policy check. */
+export interface PolicyOptions {
+  /**
+   * The write came from a partial edit (Edit / MultiEdit / an apply_patch update) rather than a
+   * whole-file write. `hooks.json` is nothing but hooks, so any partial edit of it is a hooks change,
+   * even one that only reformats: the same rule the hook script applies.
+   */
+  partial?: boolean;
 }
 
 export type PolicyResult =
@@ -42,14 +57,36 @@ const under = (parent: string, child: string): boolean => {
 const CLAUDE_SETTINGS = ['settings.json', 'settings.local.json'];
 const CODEX_FILES = ['hooks.json', 'config.toml'];
 
+/** `$CODEX_HOME` when set, else `<userHome>/.codex` (mirrors the hook script and the installer). */
+export function codexHomeOf(ctx: PolicyContext): string {
+  const c = ctx.codexHome?.trim();
+  return c ? path.resolve(c) : path.join(ctx.userHome, '.codex');
+}
+
+/** Basename and parent-folder name of a canonical path (case-folded on Windows). */
+function tail(p: string): { base: string; parent: string } {
+  const parts = norm(p).split(/[\\/]+/);
+  return { base: parts[parts.length - 1] ?? '', parent: parts[parts.length - 2] ?? '' };
+}
+
+/**
+ * `<anything>/.claude/settings.json` or `settings.local.json`: the user layer (`~/.claude`) and any
+ * project layer. Claude Code reads the project layer from the folder the agent runs in, which may be
+ * a sub-folder of the workspace, so the parent-folder name decides (same rule as the hook script).
+ */
 function isClaudeSettingsPath(p: string, ctx: PolicyContext): boolean {
+  const t = tail(p);
+  if (t.parent === '.claude' && CLAUDE_SETTINGS.includes(t.base)) return true;
   const roots = [ctx.userHome, ...ctx.folders];
   return roots.some((r) => CLAUDE_SETTINGS.some((f) => sameFile(path.join(r, '.claude', f), p)));
 }
 
+/** `<anything>/.codex/hooks.json|config.toml`, plus the same two files under `$CODEX_HOME`. */
 function isCodexConfigPath(p: string, ctx: PolicyContext): boolean {
-  const roots = [ctx.userHome, ...ctx.folders];
-  return roots.some((r) => CODEX_FILES.some((f) => sameFile(path.join(r, '.codex', f), p)));
+  const t = tail(p);
+  if (t.parent === '.codex' && CODEX_FILES.includes(t.base)) return true;
+  const roots = [codexHomeOf(ctx), path.join(ctx.userHome, '.codex'), ...ctx.folders.map((f) => path.join(f, '.codex'))];
+  return roots.some((r) => CODEX_FILES.some((f) => sameFile(path.join(r, f), p)));
 }
 
 /** True when the path has a `.git` directory segment (any depth). */
@@ -100,8 +137,17 @@ function stableJson(v: unknown): string {
 }
 
 /**
- * The hook-related lines of a codex config.toml: any line mentioning `hooks`, every line inside a
- * `[features]` table, and every line inside a `[hooks...]` table (trimmed; comments ignored).
+ * Words that mark a hook- or trust-related line in a codex config.toml: the hooks feature flag and
+ * hook tables, our own hook, `trusted_hash = "sha256:..."` trust records and `enabled =` switches.
+ * Same set as the hook script's TOML_TRUST_WORDS.
+ */
+const TOML_TRUST_WORDS = /hooks|explainit|trusted_hash|sha256:|enabled\s*=/i;
+
+/**
+ * The hook-related lines of a codex config.toml, in file order: any line matching
+ * TOML_TRUST_WORDS, every line inside a `[features]` table, and every line inside a `[hooks...]`
+ * table (trimmed; blank lines and comments ignored). Order matters: two `[hooks.state."..."]`
+ * tables swapping their `trusted_hash` values keep the same set of lines but not the same sequence.
  */
 export function codexHookLines(toml: string | null): string[] {
   if (!toml) return [];
@@ -112,15 +158,66 @@ export function codexHookLines(toml: string | null): string[] {
     if (line === '' || line.startsWith('#')) continue;
     if (/^\[.*\]$/.test(line)) {
       inRelevantTable = /^\[\s*features\s*\]$/.test(line) || /hooks/i.test(line);
-      if (inRelevantTable) out.push(line);
+      if (inRelevantTable || TOML_TRUST_WORDS.test(line)) out.push(line);
       continue;
     }
-    if (inRelevantTable || /hooks/i.test(line)) out.push(line);
+    if (inRelevantTable || TOML_TRUST_WORDS.test(line)) out.push(line);
   }
   return out;
 }
 
-/** Codex hooks.json / config.toml: did anything hook-related change? */
+/**
+ * Best-effort TOML sanity check (no TOML parser is bundled). Outside a multi-line string or an open
+ * array / inline table, every non-blank, non-comment line must be a table header or a `key = value`
+ * line. Anything else means the hook lines cannot be trusted and the write is refused.
+ */
+export function tomlLooksValid(toml: string | null): boolean {
+  if (toml === null || toml.trim() === '') return true;
+  if (toml.includes('\0')) return false;
+  let inMultiline = false;
+  let depth = 0;
+  for (const raw of toml.replace(/\r\n?/g, '\n').split('\n')) {
+    const line = raw.trim();
+    if (inMultiline) {
+      if (/"""|'''/.test(line)) inMultiline = false;
+      continue;
+    }
+    if (line === '' || line.startsWith('#')) continue;
+    if (depth > 0) {
+      depth += bracketDelta(line);
+      if (depth < 0) return false;
+      continue;
+    }
+    if (/^\[.*\]$/.test(line)) continue;
+    if (!/^[^=]+=/.test(line)) return false;
+    const value = line.slice(line.indexOf('=') + 1).trim();
+    const opens = (value.match(/"""|'''/g) ?? []).length;
+    if (opens % 2 === 1) {
+      inMultiline = true;
+      continue;
+    }
+    depth = bracketDelta(value);
+    if (depth < 0) return false;
+  }
+  return depth === 0 && !inMultiline;
+}
+
+/** Net count of `[`/`{` minus `]`/`}` outside quoted strings and comments on one line. */
+function bracketDelta(line: string): number {
+  const stripped = line.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'[^']*'/g, "''").replace(/#.*$/, '');
+  let d = 0;
+  for (const ch of stripped) {
+    if (ch === '[' || ch === '{') d++;
+    else if (ch === ']' || ch === '}') d--;
+  }
+  return d;
+}
+
+/**
+ * Codex hooks.json / config.toml: did anything hook-related change? Both sides are the FULL file
+ * content: the caller replays partial edits (Edit, MultiEdit, apply_patch) onto the current file
+ * before asking. Returns 'unparseable' when either side cannot be read as JSON / TOML.
+ */
 export function codexHooksChanged(fileName: string, before: string | null, after: string | null): boolean | 'unparseable' {
   if (fileName.toLowerCase().endsWith('.json')) {
     // hooks.json is all hooks: any content change counts; unparseable JSON is refused.
@@ -137,15 +234,16 @@ export function codexHooksChanged(fileName: string, before: string | null, after
     if (b === undefined || a === undefined) return 'unparseable';
     return stableJson(b) !== stableJson(a);
   }
-  const bs = new Set(codexHookLines(before));
-  const as = new Set(codexHookLines(after));
-  if (bs.size !== as.size) return true;
-  for (const l of bs) if (!as.has(l)) return true;
-  return false;
+  if (!tomlLooksValid(before) || !tomlLooksValid(after)) return 'unparseable';
+  return codexHookLines(before).join('\n') !== codexHookLines(after).join('\n');
 }
 
-/** Deny / ask / allow for one proposed write. */
-export function checkWritePolicy(write: ProposedWrite, ctx: PolicyContext): PolicyResult {
+/**
+ * Deny / ask / allow for one proposed write. `write.before` / `write.after` must be the FULL file
+ * content on both sides (proposals.ts replays Edit / MultiEdit / apply_patch onto the current file
+ * first), so the hooks comparison sees exactly what would land on disk.
+ */
+export function checkWritePolicy(write: ProposedWrite, ctx: PolicyContext, opts: PolicyOptions = {}): PolicyResult {
   const targets = [write.path, ...(write.newPath ? [write.newPath] : [])];
   for (const p of targets) {
     if (under(ctx.explainitHome, p)) {
@@ -181,12 +279,18 @@ export function checkWritePolicy(write: ProposedWrite, ctx: PolicyContext): Poli
       if (write.kind === 'delete' || write.kind === 'move') {
         return { action: 'deny', reason: `ExplainIT: "${p}" holds the Codex hooks that power the ExplainIT checkpoint. It may not be deleted or moved by an assistant.` };
       }
+      if (opts.partial && path.basename(p).toLowerCase() === 'hooks.json') {
+        return {
+          action: 'deny',
+          reason: `ExplainIT: "${p}" is nothing but hooks, so any edit to it changes the hooks that power the ExplainIT checkpoint. Assistants may not change it. Ask the person to change hooks themselves.`,
+        };
+      }
       const changed = codexHooksChanged(path.basename(p), write.before, write.after);
       if (changed === 'unparseable') {
         return { action: 'deny', reason: `ExplainIT: the proposed content for "${p}" cannot be parsed, so the hook settings cannot be verified. Only changes that leave hook settings untouched are allowed.` };
       }
       if (changed) {
-        return { action: 'deny', reason: `ExplainIT: the change to "${p}" would alter hook settings that power the ExplainIT checkpoint. Assistants may change other settings but not hooks. Ask the person to change hooks themselves.` };
+        return { action: 'deny', reason: `ExplainIT: the change to "${p}" would alter hook or hook-trust settings that power the ExplainIT checkpoint. Assistants may change other settings but not hooks. Ask the person to change hooks themselves.` };
       }
     }
   }
@@ -200,12 +304,13 @@ export function checkWritePolicy(write: ProposedWrite, ctx: PolicyContext): Poli
 
 /**
  * Does a shell command mention a protected path? Returns the matched fragment for the reason.
- * Checked on the raw command text (case-insensitive on Windows) with both separator styles.
+ * Checked on the raw command text, case-insensitively on every platform (like the hook script: a
+ * false deny only costs the person a retry by hand), with both separator styles.
  */
 export function protectedPathMentioned(command: string, ctx: PolicyContext): string | undefined {
-  const cmd = WIN ? command.toLowerCase() : command;
+  const cmd = command.toLowerCase();
   const variants = (p: string): string[] => {
-    const c = WIN ? p.toLowerCase() : p;
+    const c = p.toLowerCase();
     return [...new Set([c, c.replace(/\\/g, '/'), c.replace(/\//g, '\\')])];
   };
   const candidates: string[] = [];
@@ -213,13 +318,14 @@ export function protectedPathMentioned(command: string, ctx: PolicyContext): str
   for (const e of ctx.extraProtected ?? []) if (e) candidates.push(...variants(e));
   // Relative/short forms agents are likely to type.
   candidates.push('.explainit', 'explainit-hook', '.claude/settings', '.claude\\settings', '.codex/hooks', '.codex\\hooks', '.codex/config.toml', '.codex\\config.toml', '.git/info/exclude', '.git\\info\\exclude');
+  for (const f of CODEX_FILES) candidates.push(...variants(path.join(codexHomeOf(ctx), f)));
   for (const r of [ctx.userHome, ...ctx.folders]) {
     for (const f of CLAUDE_SETTINGS) candidates.push(...variants(path.join(r, '.claude', f)));
     for (const f of CODEX_FILES) candidates.push(...variants(path.join(r, '.codex', f)));
     candidates.push(...variants(path.join(r, '.git', 'info', 'exclude')));
   }
   for (const c of candidates) {
-    if (c && cmd.includes(WIN ? c.toLowerCase() : c)) return c;
+    if (c && cmd.includes(c)) return c;
   }
   return undefined;
 }

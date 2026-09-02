@@ -29,5 +29,6 @@ If none of these is installed, or one is installed but not signed in, or the too
 4. If a terminal tool is installed in an unusual place, set `explainit.assistant.claudeCliPath` or `explainit.assistant.codexCliPath` to its full path.
 5. If Copilot is installed but ExplainIT still cannot use it, open any chat with Copilot once so VS Code finishes its own sign-in, then run **ExplainIT: Doctor**. The first explanation request through Copilot shows VS Code's own consent dialog; choose Allow.
 6. To choose which assistant writes explanations, run **ExplainIT: Choose which assistant writes explanations**.
+7. **Codex sign-in expired.** If the Doctor or an explanation reports `refresh token was revoked` or `Please log out and sign in again`, Codex's sign-in has lapsed. Run `codex login` in a terminal (the Codex VS Code extension uses the same sign-in), then try again. ExplainIT adds this hint to the message whenever Codex answers that way.
 
 Nothing in this flow sends code anywhere but to the assistant you pick, under the agreement you already have with it.

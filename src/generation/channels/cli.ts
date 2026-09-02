@@ -456,6 +456,55 @@ export function cliWorkDir(homeDir: string): string {
   return dir;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Sign-in: where Codex keeps its sign-in file, and the plain-English "not signed in" messages
+// ---------------------------------------------------------------------------------------------
+
+/** What the person sees (and what the router logs) when a CLI is installed but not signed in. */
+export const SIGN_IN_MESSAGE: Record<CliKind, string> = {
+  claude: 'Claude Code is not signed in on this computer. Run "claude" in a terminal and sign in, then try again.',
+  codex: 'Codex is not signed in on this computer. Run "codex login" in a terminal, then try again.',
+};
+
+/**
+ * Codex keeps its sign-in file (auth.json), hooks.json and config.toml under CODEX_HOME when that
+ * is set (Codex honours it), else under ~/.codex — the same rule as src/adapters/codex.ts.
+ */
+export function codexHomeDir(opts: Pick<ResolveOptions, 'env' | 'homeDir'> = {}): string {
+  const env = opts.env ?? process.env;
+  const raw = env.CODEX_HOME;
+  if (raw && raw.trim()) return path.resolve(raw.trim());
+  return path.join(opts.homeDir ?? os.homedir(), '.codex');
+}
+
+/** The Codex sign-in file written by `codex login` (also by `codex login --with-api-key`). */
+export function codexAuthFile(opts: Pick<ResolveOptions, 'env' | 'homeDir'> = {}): string {
+  return path.join(codexHomeDir(opts), 'auth.json');
+}
+
+export interface CodexSignIn {
+  signedIn: boolean;
+  authFile: string;
+  /** Plain English: what was found (for logs and the availability detail). */
+  detail: string;
+}
+
+/** Best-effort sign-in check without running codex: the auth.json file, or an API key in the environment. */
+export function codexSignIn(opts: Pick<ResolveOptions, 'env' | 'homeDir'> = {}): CodexSignIn {
+  const env = opts.env ?? process.env;
+  const authFile = codexAuthFile(opts);
+  let present = false;
+  try {
+    present = fs.statSync(authFile).isFile();
+  } catch {
+    present = false;
+  }
+  if (present) return { signedIn: true, authFile, detail: `sign-in file found at ${authFile}` };
+  const key = ['OPENAI_API_KEY', 'CODEX_API_KEY'].find((k) => (env[k] ?? '').trim());
+  if (key) return { signedIn: true, authFile, detail: `API key from ${key} (no sign-in file at ${authFile})` };
+  return { signedIn: false, authFile, detail: `no sign-in file at ${authFile}` };
+}
+
 /** `<cli> --version` within 10 s. */
 export async function probeVersion(spec: CliSpec, timeoutMs = 10_000): Promise<{ ok: boolean; version?: string; detail: string }> {
   try {

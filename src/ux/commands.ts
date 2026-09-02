@@ -13,7 +13,7 @@ import type { Logger } from '../core/log';
 import { canonicalPath, isInside } from '../core/paths';
 import type { PausedBanner } from './banner';
 import type { UxDeps } from './deps';
-import { MESSAGES, msg, describeError } from './pure/messages';
+import { MESSAGES, msg, describeError, withSignInHint } from './pure/messages';
 import { renderJournalMarkdown } from './pure/render';
 import { channelLabel } from './pure/statusModel';
 import type { Prompter } from './prompts';
@@ -126,7 +126,7 @@ export function registerCommands(ctx: CommandContext): void {
           return await handler(...args);
         } catch (e) {
           logger.error(`command ${id} failed`, e);
-          void prompter.notify(msg('commandFailed', { command: titleOf(id), detail: describeError(e) }), 'error');
+          void prompter.notify(msg('commandFailed', { command: titleOf(id), detail: withSignInHint(describeError(e)) }), 'error');
           return undefined;
         }
       }),
@@ -198,7 +198,7 @@ async function openTwin(ctx: CommandContext, arg: unknown, force: boolean): Prom
     if (!result) void prompter.notify(MESSAGES.twinUnsupportedFile, 'warning');
     else if (result.sections.length === 0) void prompter.notify(MESSAGES.twinNoFunctions, 'info');
   } catch (e) {
-    void prompter.notify(msg('twinCreateFailed', { file: path.basename(doc.uri.fsPath), detail: describeError(e) }), 'error');
+    void prompter.notify(msg('twinCreateFailed', { file: path.basename(doc.uri.fsPath), detail: withSignInHint(describeError(e)) }), 'error');
   }
 }
 
@@ -258,12 +258,12 @@ async function backfill(ctx: CommandContext): Promise<void> {
   try {
     await ux.twin.backfill.start();
   } catch (e) {
-    void prompter.notify(msg('backfillFailed', { detail: describeError(e) }), 'error');
+    void prompter.notify(msg('backfillFailed', { detail: withSignInHint(describeError(e)) }), 'error');
     return;
   }
   const after = ux.twin.backfill.status();
   if (after.state === 'done') void prompter.notify(after.totalFiles === 0 ? MESSAGES.backfillNothingToDo : msg('backfillDone', { done: after.doneFiles }), 'info');
-  else if (after.state === 'error') void prompter.notify(msg('backfillFailed', { detail: after.error ?? 'unknown error.' }), 'error');
+  else if (after.state === 'error') void prompter.notify(msg('backfillFailed', { detail: withSignInHint(after.error ?? 'unknown error.') }), 'error');
   else if (after.state === 'cancelled') void prompter.notify(MESSAGES.backfillCancelled, 'info');
   else if (after.state === 'paused') void prompter.notify(msg('backfillPaused', { done: after.doneFiles, total: after.totalFiles }), 'info');
 }

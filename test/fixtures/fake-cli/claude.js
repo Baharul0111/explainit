@@ -5,7 +5,7 @@
 //   claude -p ... --output-format stream-json --include-partial-messages --verbose
 // The prompt comes from the positional argument or stdin. See common.js for FAKE_CLI_MODE.
 'use strict';
-const { parseArgv, readPrompt, logPrompt, replyFor, shouldFail, chunks, writeLines } = require('./common');
+const { parseArgv, readPrompt, logPrompt, replyFor, shouldFail, signedOut, CLAUDE_SIGNED_OUT, chunks, writeLines } = require('./common');
 
 const VALUE_FLAGS = ['--output-format', '--tools', '--model', '--max-turns', '--input-format', '--append-system-prompt', '--system-prompt', '--json-schema', '--effort', '--permission-mode', '--settings', '--mcp-config'];
 
@@ -26,6 +26,15 @@ async function main() {
     return 1;
   }
   const format = flags.get('--output-format') || 'text';
+  if (signedOut()) {
+    // The real CLI prints the sign-in notice on stderr and exits 1; with json output some versions
+    // also report it as an error result. Emit both so either reading path is covered.
+    process.stderr.write(CLAUDE_SIGNED_OUT + '\n');
+    if (format === 'json') {
+      process.stdout.write(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, duration_ms: 1, num_turns: 0, result: CLAUDE_SIGNED_OUT, session_id: 'fake-session-0000' }) + '\n');
+    }
+    return 1;
+  }
   const text = await replyFor(prompt);
   const session = 'fake-session-0000';
   if (format === 'json') {
