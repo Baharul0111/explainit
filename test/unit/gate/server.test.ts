@@ -162,19 +162,30 @@ suite('gate/server', () => {
       // Some platforms still reset the connection once the answer is out (the client is usually
       // mid-write when the cap is hit). That is fine as long as the answer arrived first; a reset
       // with no answer at all is the failure this test guards.
-      req.on('error', (e) => (status ? settle() : reject(e)));
+      let stop = false;
+      req.on('error', (e) => {
+        stop = true;
+        if (status) settle();
+        else reject(e);
+      });
+      // The server closes the socket once it has answered; a late write then fails with EPIPE on the
+      // socket itself, which must never surface as an uncaught exception.
+      req.on('socket', (s) => s.on('error', () => { stop = true; }));
+      req.on('response', () => { stop = true; });
       req.write('{"agent":"claude","event":"PreToolUse","payload":{"tool_name":"Write","tool_input":{"content":"');
       const piece = Buffer.alloc(256 * 1024, 0x78);
       let sent = 0;
       const pump = (): void => {
+        if (stop || req.destroyed || req.writableEnded) return;
         while (sent <= BODY_LIMIT + piece.length) {
+          if (stop || req.destroyed) return;
           sent += piece.length;
-          if (!req.write(piece)) {
+          if (!req.write(piece, () => undefined)) {
             req.once('drain', pump);
             return;
           }
         }
-        req.end('"}}');
+        if (!stop && !req.destroyed) req.end('"}}');
       };
       pump();
     });
