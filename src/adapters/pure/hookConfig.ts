@@ -6,6 +6,7 @@
  * their command containing `explainit-hook`; everything else in the file is left untouched.
  */
 import { sha256, canonicalJson } from '../../core/hash';
+import { cmdQuote, shQuote } from './wrappers';
 
 export type HookEvent = 'PreToolUse' | 'PostToolUse';
 
@@ -24,20 +25,52 @@ export const CODEX_POST_MATCHER = 'apply_patch|Edit|Write';
 export const PRE_TIMEOUT = 7200;
 export const POST_TIMEOUT = 10;
 
+/**
+ * Absolute locations baked into the hook command at install time. The hook prefers these over
+ * `EXPLAINIT_HOME`, `HOME` and `CODEX_HOME`, so an assistant that exports a different value in a
+ * shell profile cannot point the hook at a rogue gate or move the protected files out from under
+ * it. They are part of the command text and therefore of the integrity hash.
+ */
+export interface HookPins {
+  /** ExplainIT home (sessions, hooks, state live here). */
+  explainitHome: string;
+  /** Folder holding Claude Code's user-layer settings.json / settings.local.json. */
+  claudeHome: string;
+  /** Folder holding Codex's user-layer hooks.json / config.toml (CODEX_HOME when set, else ~/.codex). */
+  codexHome: string;
+  /** Which shell quotes the paths: cmd.exe on win32, POSIX sh elsewhere. */
+  platform: NodeJS.Platform;
+  /** What the Codex hook does when ExplainIT does not answer in time (Codex has no `ask`). */
+  codexUnresponsive?: 'deny' | 'passthrough';
+}
+
+function quoteFor(platform: NodeJS.Platform): (s: string) => string {
+  return platform === 'win32' ? cmdQuote : shQuote;
+}
+
+/** `--home ... --claude-home ... --codex-home ...`, quoted for the platform's shell. */
+export function pinArgs(pins: HookPins): string {
+  const q = quoteFor(pins.platform);
+  return `--home ${q(pins.explainitHome)} --claude-home ${q(pins.claudeHome)} --codex-home ${q(pins.codexHome)}`;
+}
+
 /** `quotedWrapper` is the wrapper path already quoted for the shell (see shQuote/cmdQuote). */
-export function claudeEntrySpecs(quotedWrapper: string, watchdogSeconds: number): HookEntrySpec[] {
+export function claudeEntrySpecs(quotedWrapper: string, watchdogSeconds: number, pins: HookPins): HookEntrySpec[] {
   const w = Math.max(30, Math.floor(watchdogSeconds) || 120);
+  const p = pinArgs(pins);
   return [
-    { event: 'PreToolUse', matcher: CLAUDE_PRE_MATCHER, command: `${quotedWrapper} --agent claude --watchdog ${w}`, timeout: PRE_TIMEOUT },
-    { event: 'PostToolUse', matcher: CLAUDE_POST_MATCHER, command: `${quotedWrapper} --agent claude --event PostToolUse`, timeout: POST_TIMEOUT },
+    { event: 'PreToolUse', matcher: CLAUDE_PRE_MATCHER, command: `${quotedWrapper} --agent claude --watchdog ${w} ${p}`, timeout: PRE_TIMEOUT },
+    { event: 'PostToolUse', matcher: CLAUDE_POST_MATCHER, command: `${quotedWrapper} --agent claude --event PostToolUse ${p}`, timeout: POST_TIMEOUT },
   ];
 }
 
-export function codexEntrySpecs(quotedWrapper: string, watchdogSeconds: number): HookEntrySpec[] {
+export function codexEntrySpecs(quotedWrapper: string, watchdogSeconds: number, pins: HookPins): HookEntrySpec[] {
   const w = Math.max(30, Math.floor(watchdogSeconds) || 120);
+  const p = pinArgs(pins);
+  const unresponsive = pins.codexUnresponsive === 'passthrough' ? 'passthrough' : 'deny';
   return [
-    { event: 'PreToolUse', matcher: CODEX_PRE_MATCHER, command: `${quotedWrapper} --agent codex --watchdog ${w}`, timeout: PRE_TIMEOUT },
-    { event: 'PostToolUse', matcher: CODEX_POST_MATCHER, command: `${quotedWrapper} --agent codex --event PostToolUse`, timeout: POST_TIMEOUT },
+    { event: 'PreToolUse', matcher: CODEX_PRE_MATCHER, command: `${quotedWrapper} --agent codex --watchdog ${w} --unresponsive ${unresponsive} ${p}`, timeout: PRE_TIMEOUT },
+    { event: 'PostToolUse', matcher: CODEX_POST_MATCHER, command: `${quotedWrapper} --agent codex --event PostToolUse ${p}`, timeout: POST_TIMEOUT },
   ];
 }
 

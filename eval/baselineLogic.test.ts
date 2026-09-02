@@ -1,5 +1,5 @@
 import * as assert from 'node:assert';
-import { MAX_HISTORY, compareNewestToPrevious, emptyBaseline, fmt, parseBaselineText, previewRegression, promptChangedMessage, staleChannels, staleChannelsMessage, updateBaseline, validateBaseline, type Baseline, type ChannelScore, type HistoryEntry } from './pure/baseline';
+import { MAX_HISTORY, compareNewest, compareNewestToBest, compareNewestToPrevious, emptyBaseline, fmt, parseBaselineText, previewRegression, promptChangedMessage, staleChannels, staleChannelsMessage, updateBaseline, validateBaseline, type Baseline, type ChannelScore, type HistoryEntry } from './pure/baseline';
 
 const H1 = 'a'.repeat(64);
 const H2 = 'b'.repeat(64);
@@ -67,6 +67,80 @@ suite('eval/pure/baseline: compareNewestToPrevious', () => {
     const r = compareNewestToPrevious(h);
     assert.strictEqual(r.problems.length, 2);
     assert.deepStrictEqual(r.compared, ['claude', 'codex', 'fake']);
+  });
+});
+
+suite('eval/pure/baseline: compareNewestToBest', () => {
+  const at = (day: number): string => `2026-09-${String(day).padStart(2, '0')}T00:00:00.000Z`;
+  const run = (scores: HistoryEntry['scores'], day: number, promptHash = H1, channel: HistoryEntry['channel'] = 'claude'): HistoryEntry => ({ ranAt: at(day), channel, promptHash, scores });
+
+  test('fewer than two entries, or no earlier entry under the same prompt hash, passes', () => {
+    assert.deepStrictEqual(compareNewestToBest([]), { ok: true, problems: [], compared: [] });
+    assert.deepStrictEqual(compareNewestToBest([run({ claude: score(0.5, 0.5) }, 1)]), { ok: true, problems: [], compared: [] });
+    assert.ok(compareNewestToBest(undefined as never).ok);
+    // The old prompts' best run does not bind a run made with new prompts.
+    const r = compareNewestToBest([run({ claude: score(1, 1, at(1)) }, 1, H1), run({ claude: score(0.5, 1, at(2)) }, 2, H2)]);
+    assert.ok(r.ok);
+    assert.deepStrictEqual(r.compared, []);
+  });
+
+  test('a sequence of small drops is refused against the best run', () => {
+    // 12/12 -> 11/12 -> 11/12: the newest run equals the previous one (the previous-run check is happy)
+    // but is still below the best the prompts achieved.
+    const equalAfterDrop = [run({ claude: score(1, 1, at(1)) }, 1), run({ claude: score(0.9167, 1, at(2)) }, 2), run({ claude: score(0.9167, 1, at(3)) }, 3)];
+    assert.ok(compareNewestToPrevious(equalAfterDrop).ok, 'previous-run check alone lets it through');
+    const r = compareNewestToBest(equalAfterDrop);
+    assert.strictEqual(r.ok, false);
+    assert.deepStrictEqual(r.compared, ['claude']);
+    assert.strictEqual(r.problems.length, 1);
+    assert.ok(r.problems[0].startsWith('Explanation quality for claude is below the best run with these prompts: pass@1 is 91.7%, below the best run\'s 100% (2026-09-01T00:00:00.000Z)'), r.problems[0]);
+    assert.ok(r.problems[0].endsWith('refusing this prompt change.'), r.problems[0]);
+
+    // 12/12 -> 10/12 -> 11/12: a partial recovery is a rise for the previous-run check, still a drop against the best.
+    const partialRecovery = [run({ claude: score(1, 1, at(1)) }, 1), run({ claude: score(0.8333, 1, at(2)) }, 2), run({ claude: score(0.9167, 1, at(3)) }, 3)];
+    assert.ok(compareNewestToPrevious(partialRecovery).ok);
+    assert.strictEqual(compareNewestToBest(partialRecovery).ok, false);
+
+    // Both checks together refuse it, and the combined report keeps both wordings when both apply.
+    assert.strictEqual(compareNewest(partialRecovery).ok, false);
+    const both = compareNewest([run({ claude: score(1, 1, at(1)) }, 1), run({ claude: score(0.9, 1, at(2)) }, 2), run({ claude: score(0.8, 1, at(3)) }, 3)]);
+    assert.strictEqual(both.problems.length, 2);
+    assert.ok(/dropped for claude: pass@1 fell from 90% to 80%/.test(both.problems[0]));
+    assert.ok(/below the best run's 100%/.test(both.problems[1]));
+    assert.deepStrictEqual(both.compared, ['claude']);
+  });
+
+  test('equal to the best passes; style is compared to its own best independently of pass@1', () => {
+    const h = [run({ claude: score(0.9, 1, at(1)) }, 1), run({ claude: score(1, 0.9, at(2)) }, 2), run({ claude: score(1, 1, at(3)) }, 3)];
+    assert.ok(compareNewestToBest(h).ok);
+    const styleDrop = [...h, run({ claude: score(1, 0.95, at(4)) }, 4)];
+    const r = compareNewestToBest(styleDrop);
+    assert.strictEqual(r.ok, false);
+    assert.ok(/style conformance is 95%, below the best run's 100% \(2026-09-01T00:00:00.000Z\)/.test(r.problems[0]), r.problems[0]);
+    assert.ok(!/pass@1/.test(r.problems[0]));
+  });
+
+  test('only channels with an earlier score under the current prompts are compared; floating point noise is not a drop', () => {
+    const h = [run({ claude: score(1, 1, at(1)) }, 1), run({ claude: score(1, 1, at(1)), codex: score(0.1, 0.1, at(2)) }, 2, H1, 'codex')];
+    const r = compareNewestToBest(h);
+    assert.ok(r.ok);
+    assert.deepStrictEqual(r.compared, ['claude']);
+    assert.ok(compareNewestToBest([run({ fake: score(0.1 + 0.2, 1) }, 1), run({ fake: score(0.3, 1) }, 2)]).ok);
+    // A malformed earlier entry is skipped rather than crashing the check.
+    assert.ok(compareNewestToBest([{ ranAt: at(1), channel: 'claude', promptHash: H1, scores: undefined as never }, run({ claude: score(1, 1) }, 2)]).ok);
+  });
+
+  test('the committed-shape history (one channel at a time, snapshots carried forward) passes when nothing dropped', () => {
+    let b = updateBaseline(undefined, 'fake', score(0.9167, 1, at(1)), H1);
+    b = updateBaseline(b, 'claude', score(1, 1, at(2)), H1);
+    b = updateBaseline(b, 'codex', score(1, 1, at(3)), H1);
+    assert.ok(compareNewestToBest(b.history).ok);
+    b = updateBaseline(b, 'fake', score(0.8333, 1, at(4)), H1);
+    assert.strictEqual(compareNewestToBest(b.history).ok, false, 'fake dropped below its best 91.7%');
+    // previewRegression now covers the best-run check too.
+    const good = updateBaseline(undefined, 'claude', score(1, 1, at(1)), H1);
+    const dipped = updateBaseline(good, 'claude', score(0.8333, 1, at(2)), H1);
+    assert.strictEqual(previewRegression(dipped, 'claude', score(0.9167, 1, at(3)), H1).ok, false, 'a partial recovery is still below the best');
   });
 });
 

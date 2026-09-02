@@ -45,7 +45,7 @@ suite('adapters/pure/pathLookup', () => {
 });
 
 suite('adapters/pure/wrappers', () => {
-  const input = { runtime: '/opt/homebrew/bin/node', script: '/Users/me/.explainit/hooks/explainit-hook.js', electron: false };
+  const input = { runtime: '/opt/homebrew/bin/node', script: '/Users/me/.explainit/hooks/explainit-hook.js', electron: false, explainitHome: '/Users/me/.explainit' };
 
   test('sh wrapper execs the runtime with quoting and passes args', () => {
     const sh = wrapperShContent(input);
@@ -55,19 +55,27 @@ suite('adapters/pure/wrappers', () => {
     assert.ok(!sh.includes('\r'));
   });
 
+  test('sh wrapper pins EXPLAINIT_HOME before exec so a shell profile cannot redirect the hook', () => {
+    const sh = wrapperShContent(input);
+    assert.ok(sh.includes('EXPLAINIT_HOME="/Users/me/.explainit"\nexport EXPLAINIT_HOME\nexec '), sh);
+    const odd = wrapperShContent({ ...input, explainitHome: '/h/$weird "dir"' });
+    assert.ok(odd.includes('EXPLAINIT_HOME="/h/\\$weird \\"dir\\""\n'), odd);
+  });
+
   test('sh wrapper sets ELECTRON_RUN_AS_NODE only for electron runtimes and escapes specials', () => {
-    const sh = wrapperShContent({ runtime: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron', script: '/h/$weird "dir"/explainit-hook.js', electron: true });
+    const sh = wrapperShContent({ runtime: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron', script: '/h/$weird "dir"/explainit-hook.js', electron: true, explainitHome: '/h/$weird "dir"' });
     assert.ok(sh.includes('ELECTRON_RUN_AS_NODE=1\nexport ELECTRON_RUN_AS_NODE\n'));
     assert.ok(sh.includes('"/Applications/Visual Studio Code.app/Contents/MacOS/Electron"'));
     assert.ok(sh.includes('"/h/\\$weird \\"dir\\"/explainit-hook.js"'));
   });
 
-  test('cmd wrapper uses CRLF, @echo off, %* and the electron flag only when needed', () => {
-    const cmd = wrapperCmdContent({ runtime: 'C:\\Program Files\\nodejs\\node.exe', script: 'C:\\Users\\me\\.explainit\\hooks\\explainit-hook.js', electron: false });
+  test('cmd wrapper uses CRLF, @echo off, %*, pins EXPLAINIT_HOME and the electron flag only when needed', () => {
+    const cmd = wrapperCmdContent({ runtime: 'C:\\Program Files\\nodejs\\node.exe', script: 'C:\\Users\\me\\.explainit\\hooks\\explainit-hook.js', electron: false, explainitHome: 'C:\\Users\\me\\.explainit' });
     assert.ok(cmd.startsWith('@echo off\r\n'));
+    assert.ok(cmd.includes('set "EXPLAINIT_HOME=C:\\Users\\me\\.explainit"\r\n'), cmd);
     assert.ok(cmd.endsWith('"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\me\\.explainit\\hooks\\explainit-hook.js" %*\r\n'));
     assert.ok(!cmd.includes('ELECTRON_RUN_AS_NODE'));
-    const el = wrapperCmdContent({ runtime: 'C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe', script: 'C:\\x\\explainit-hook.js', electron: true });
+    const el = wrapperCmdContent({ runtime: 'C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe', script: 'C:\\x\\explainit-hook.js', electron: true, explainitHome: 'C:\\x' });
     assert.ok(el.includes('set ELECTRON_RUN_AS_NODE=1\r\n'));
   });
 
@@ -100,6 +108,11 @@ suite('adapters/runtime', () => {
     try {
       const w = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'));
       assert.strictEqual(w.sh.path, path.join(dir, 'explainit-hook.sh'));
+      // The home defaults to the parent of the hooks folder and is pinned into both wrappers.
+      assert.ok(fs.readFileSync(w.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.dirname(dir)}"`));
+      assert.ok(fs.readFileSync(w.cmd.path, 'utf8').includes(`set "EXPLAINIT_HOME=${path.dirname(dir)}"`));
+      const pinned = writeWrappers(dir, { path: process.execPath, electron: false, source: 'path' }, path.join(dir, 'explainit-hook.js'), path.join(dir, 'other-home'));
+      assert.ok(fs.readFileSync(pinned.sh.path, 'utf8').includes(`EXPLAINIT_HOME="${path.join(dir, 'other-home')}"`));
       assert.strictEqual(w.cmd.path, path.join(dir, 'explainit-hook.cmd'));
       assert.strictEqual(sha256(fs.readFileSync(w.sh.path)), w.sh.hash);
       assert.strictEqual(sha256(fs.readFileSync(w.cmd.path)), w.cmd.hash);

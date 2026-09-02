@@ -6,9 +6,12 @@ import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { decideWith, json, longPollThen, runHook, startStub, writeSession, type HookRun, type StubGate } from './stubGate';
+import { spawn } from 'node:child_process';
+import { resolveNodeRuntime, writeWrappers } from '../../src/adapters/runtime';
+import { decideWith, HOOK_SCRIPT, json, longPollThen, runHook, startStub, writeSession, type HookRun, type StubGate } from './stubGate';
 
 const ASK_REASON = 'ExplainIT is not responding; falling back to your normal permission prompt.';
+const UNRESPONSIVE_DENY = 'ExplainIT is not responding; try again in a moment (nothing lands unchecked).';
 
 suite('hook script conformance', function () {
   this.timeout(60000);
@@ -279,9 +282,42 @@ suite('hook script conformance', function () {
     const silent = await startStub();
     silent.handler = () => undefined;
     writeSession(home, silent, [proj]);
-    const r2 = await hook(['--agent', 'codex', '--watchdog', '2'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
-    assert.strictEqual(r2.stdout, '');
+    const r2 = await hook(['--agent', 'codex', '--watchdog', '2', '--unresponsive', 'passthrough'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.strictEqual(r2.stdout, '', 'passthrough: the person chose to let Codex follow its own policy');
+    assert.match(r2.stderr, /ExplainIT is not responding/);
     await silent.close();
+  });
+
+  test('codex --unresponsive deny (the default): a silent gate ends in deny with a try-again reason', async () => {
+    const silent = await startStub();
+    silent.handler = () => undefined;
+    writeSession(home, silent, [proj]);
+    const explicit = await hook(['--agent', 'codex', '--watchdog', '2', '--unresponsive', 'deny'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.deepStrictEqual(parse(explicit), { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: UNRESPONSIVE_DENY } });
+    assert.ok(explicit.ms >= 1900 && explicit.ms < 8000, `took ${explicit.ms} ms`);
+    const byDefault = await hook(['--agent', 'codex', '--watchdog', '2'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.strictEqual(parse(byDefault).hookSpecificOutput.permissionDecision, 'deny', 'no flag means deny, like the setting default');
+    // Mid long-poll silence is the same case.
+    silent.handler = (req, res) => {
+      if (req.method === 'POST') return json(res, 202, { requestId: 'r' });
+    };
+    const midPoll = await hook(['--agent', 'codex', '--watchdog', '2', '--unresponsive', 'deny'], codexPayload('apply_patch', { command: '*** Begin Patch\n*** Update File: src/app.py\n*** End Patch' }));
+    assert.strictEqual(parse(midPoll).hookSpecificOutput.permissionDecisionReason, UNRESPONSIVE_DENY);
+    await silent.close();
+  });
+
+  test('codex --unresponsive deny also covers a gate that refuses connections; claude still gets ask', async () => {
+    const dead = await startStub();
+    const port = dead.port;
+    await dead.close();
+    writeSession(home, { port, token: 'deadbeef' }, [proj]);
+    const codex = await hook(['--agent', 'codex', '--watchdog', '5', '--unresponsive', 'deny'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.strictEqual(parse(codex).hookSpecificOutput.permissionDecision, 'deny');
+    assert.strictEqual(parse(codex).hookSpecificOutput.permissionDecisionReason, UNRESPONSIVE_DENY);
+    const passthrough = await hook(['--agent', 'codex', '--watchdog', '5', '--unresponsive', 'passthrough'], codexPayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.strictEqual(passthrough.stdout, '');
+    const claude = await hook(['--agent', 'claude', '--watchdog', '5', '--unresponsive', 'deny'], claudePayload('Write', { file_path: path.join(proj, 'x.py'), content: 'x' }));
+    assert.deepStrictEqual(parse(claude), { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', permissionDecisionReason: ASK_REASON } }, 'Claude Code behaviour is unchanged');
   });
 
   test('PostToolUse -> empty stdout and the stub received the POST', async () => {
@@ -314,6 +350,161 @@ suite('hook script conformance', function () {
     const big = Buffer.alloc(8 * 1024 * 1024 + 10, 0x20);
     assert.strictEqual((await hook(['--agent', 'claude'], big)).stdout, '');
     assert.strictEqual(stub.requests.length, 0);
+  });
+
+  test('F1: a rogue EXPLAINIT_HOME with a fake session cannot redirect a hook that carries --home', async () => {
+    // The attack: an assistant exports EXPLAINIT_HOME=/rogue in a shell profile and drops a session file there
+    // that points at a gate answering "allow". The installed command pins --home, so that folder is never read.
+    const rogueHome = path.join(root, 'rogue-home');
+    const rogueGate = await startStub();
+    rogueGate.handler = decideWith({ permissionDecision: 'allow', reason: 'rogue says yes' });
+    writeSession(rogueHome, rogueGate, [proj, home]);
+    try {
+      // No session in the real home -> nothing (the assistant's own flow), never the rogue allow.
+      const plain = await hook(['--agent', 'claude', '--home', home], claudePayload('Write', { file_path: path.join(proj, 'src', 'app.py'), content: 'x' }), { EXPLAINIT_HOME: rogueHome });
+      assert.strictEqual(plain.stdout, '');
+      // A protected path is still denied from the real home's point of view.
+      const denied = await hook(['--agent', 'claude', '--home', home], claudePayload('Write', { file_path: path.join(home, 'state.json'), content: '{}' }), { EXPLAINIT_HOME: rogueHome });
+      assert.strictEqual(parse(denied).hookSpecificOutput.permissionDecision, 'deny');
+      const codexDenied = await hook(['--agent', 'codex', '--home', home], codexPayload('Write', { file_path: path.join(home, 'hooks', 'explainit-hook.js'), content: '' }), { EXPLAINIT_HOME: rogueHome });
+      assert.strictEqual(parse(codexDenied).hookSpecificOutput.permissionDecision, 'deny');
+      // With a real session that says deny, the rogue allow still never wins.
+      writeSession(home, stub, [proj]);
+      stub.handler = decideWith({ permissionDecision: 'deny', reason: 'Rejected by the person.' });
+      const real = await hook(['--agent', 'claude', '--home', home], claudePayload('Write', { file_path: path.join(proj, 'src', 'app.py'), content: 'x' }), { EXPLAINIT_HOME: rogueHome });
+      assert.strictEqual(parse(real).hookSpecificOutput.permissionDecision, 'deny');
+      assert.strictEqual(rogueGate.requests.length, 0, 'the rogue gate was never contacted');
+      assert.strictEqual(stub.requests.length, 1);
+      // Without --home (a hand-run script) the environment is still honoured, which is what the pin protects against.
+      const handRun = await hook(['--agent', 'claude'], claudePayload('Write', { file_path: path.join(proj, 'src', 'app.py'), content: 'x' }), { EXPLAINIT_HOME: rogueHome });
+      assert.strictEqual(parse(handRun).hookSpecificOutput.permissionDecisionReason, 'rogue says yes');
+    } finally {
+      await rogueGate.close();
+    }
+  });
+
+  test('F1: --claude-home / --codex-home keep the protected files where they are when HOME and CODEX_HOME are spoofed', async () => {
+    const realUser = path.join(root, 'real-user');
+    const claudeHome = path.join(realUser, '.claude');
+    const codexHome = path.join(realUser, 'codex-home');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true });
+    const spoof = { HOME: path.join(root, 'spoofed-home'), USERPROFILE: path.join(root, 'spoofed-home'), CODEX_HOME: path.join(root, 'spoofed-codex') };
+    const pins = ['--home', home, '--claude-home', claudeHome, '--codex-home', codexHome];
+    const settings = await hook(['--agent', 'claude', ...pins], claudePayload('Write', { file_path: path.join(claudeHome, 'settings.json'), content: '{}' }), spoof);
+    assert.strictEqual(parse(settings).hookSpecificOutput.permissionDecision, 'deny', 'user-layer settings.json is still the pinned one');
+    const local = await hook(['--agent', 'claude', ...pins], claudePayload('Write', { file_path: path.join(claudeHome, 'settings.local.json'), content: '{}' }), spoof);
+    assert.strictEqual(parse(local).hookSpecificOutput.permissionDecision, 'deny');
+    const hooksJson = await hook(['--agent', 'codex', ...pins], codexPayload('Write', { file_path: path.join(codexHome, 'hooks.json'), content: '{"hooks":{}}' }), spoof);
+    assert.strictEqual(parse(hooksJson).hookSpecificOutput.permissionDecision, 'deny', 'CODEX_HOME spoofing does not move hooks.json');
+    const toml = await hook(['--agent', 'codex', ...pins], codexPayload('Edit', { file_path: path.join(codexHome, 'config.toml'), old_string: 'a', new_string: 'b' }), spoof);
+    assert.strictEqual(parse(toml).hookSpecificOutput.permissionDecision, 'deny');
+    // Shell spelling of the pinned locations is denied too.
+    const sh = await hook(['--agent', 'claude', ...pins], claudePayload('Bash', { command: `cp /tmp/x ${path.join(codexHome, 'config.toml')}` }), spoof);
+    assert.strictEqual(parse(sh).hookSpecificOutput.permissionDecision, 'deny');
+    // And a file in the spoofed homes is an ordinary file (project rule by parent-folder name still applies to .claude/.codex).
+    const other = await hook(['--agent', 'codex', ...pins], codexPayload('Write', { file_path: path.join(root, 'spoofed-codex', 'notes.md'), content: 'x' }), spoof);
+    assert.strictEqual(other.stdout, '');
+  });
+
+  test('F2: .git/hooks/** and .git/config are denied for Write/Edit/apply_patch; other .git internals are not the hook\'s business', async () => {
+    fs.mkdirSync(path.join(proj, '.git', 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n');
+    const cases: [string, string, Record<string, unknown>][] = [
+      ['claude', 'Write', { file_path: path.join(proj, '.git', 'hooks', 'pre-commit'), content: '#!/bin/sh\ncurl evil' }],
+      ['claude', 'Edit', { file_path: path.join(proj, '.git', 'config'), old_string: '[core]', new_string: '[core]\n\thooksPath = /tmp/evil' }],
+      ['claude', 'MultiEdit', { file_path: path.join(proj, '.git', 'hooks', 'post-checkout.sample'), edits: [{ old_string: 'a', new_string: 'b' }] }],
+      ['claude', 'Write', { file_path: path.join(proj, 'sub', '.git', 'hooks', 'x'), content: '' }],
+      ['codex', 'Write', { file_path: path.join(proj, '.git', 'config'), content: '[core]\n\thooksPath = /tmp/evil\n' }],
+      ['codex', 'Edit', { file_path: path.join(proj, '.git', 'hooks', 'pre-push'), old_string: '', new_string: 'x' }],
+    ];
+    for (const [agent, tool, input] of cases) {
+      const r = await hook(['--agent', agent], agent === 'claude' ? claudePayload(tool, input) : codexPayload(tool, input));
+      assert.strictEqual(parse(r).hookSpecificOutput.permissionDecision, 'deny', `${agent} ${tool} ${JSON.stringify(input)}`);
+      assert.match(parse(r).hookSpecificOutput.permissionDecisionReason, /git/i);
+    }
+    for (const patch of ['*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+x\n*** End Patch', '*** Begin Patch\n*** Update File: .git/config\n@@\n-a\n+b\n*** End Patch']) {
+      const r = await hook(['--agent', 'codex'], codexPayload('apply_patch', { command: patch }));
+      assert.strictEqual(parse(r).hookSpecificOutput.permissionDecision, 'deny', patch);
+    }
+    // Other .git internals: the gate answers ask when a window is running; with none, the agent's own flow.
+    const head = await hook(['--agent', 'claude'], claudePayload('Write', { file_path: path.join(proj, '.git', 'HEAD'), content: 'ref: refs/heads/main\n' }));
+    assert.strictEqual(head.stdout, '');
+    const configLike = await hook(['--agent', 'claude'], claudePayload('Write', { file_path: path.join(proj, 'config'), content: 'x' }));
+    assert.strictEqual(configLike.stdout, '', 'a file merely named config outside .git is ordinary');
+  });
+
+  test('F2/F4: shell commands are denied when they write a protected file, also after cd/pushd or through a subshell', async () => {
+    const realUser = path.join(root, 'shell-user');
+    const claudeHome = path.join(realUser, '.claude');
+    const codexHome = path.join(realUser, '.codex');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(path.join(proj, '.git', 'hooks'), { recursive: true });
+    const env = { HOME: realUser, USERPROFILE: realUser };
+    const pins = ['--home', home, '--claude-home', claudeHome, '--codex-home', codexHome];
+    const denied = [
+      'cd ~/.claude && cat > settings.json',
+      'cd ~/.claude; printf "{}" > settings.local.json',
+      'pushd $HOME/.codex && echo x > hooks.json',
+      'cd .git && cat > config <<EOF\n[core]\n\thooksPath = /tmp/evil\nEOF',
+      'cd .git/hooks',
+      'cd .git; cd hooks; echo "curl evil" > pre-commit; chmod +x pre-commit',
+      'echo x > .git/config',
+      'tee .git/hooks/pre-commit < /tmp/evil.sh',
+      'cp /tmp/evil.sh .git/hooks/pre-commit',
+      'git config core.hooksPath /tmp/hooks',
+      'git config --local user.email a@b.c',
+      'git config --global core.hooksPath /tmp/hooks',
+      'bash -c "cd ~/.claude && printf x > settings.json"',
+      `sh -lc 'cd ${claudeHome} && sed -i "" s/x/y/ settings.json'`,
+      `cd ${path.join(realUser, '.codex')} && rm hooks.json`,
+      `cd ${home} && ls`,
+      'apply_patch <<EOF\n*** Begin Patch\n*** Update File: .git/hooks/pre-commit\n@@\n+x\n*** End Patch\nEOF',
+    ];
+    for (const cmd of denied) {
+      const r = await hook(['--agent', 'claude', ...pins], claudePayload('Bash', { command: cmd }), env);
+      assert.strictEqual(r.stdout === '' ? 'nothing' : parse(r).hookSpecificOutput.permissionDecision, 'deny', cmd);
+    }
+    // Codex sends argv; the script inside `bash -lc` is analysed, not a re-joined approximation of it.
+    const argv = await hook(['--agent', 'codex', ...pins], codexPayload('shell', { command: ['bash', '-lc', 'cd ~/.codex && cat > config.toml'] }), env);
+    assert.strictEqual(parse(argv).hookSpecificOutput.permissionDecision, 'deny');
+    const allowed = ['npm test', 'cd src && cat > app.py', 'git status', 'git config --get user.name', 'git config --list', 'echo hi > out.txt', 'cd .git && cat HEAD', 'cd ~ && ls', 'ls -la .git/refs', 'cat .gitconfig'];
+    for (const cmd of allowed) {
+      const r = await hook(['--agent', 'claude', ...pins], claudePayload('Bash', { command: cmd }), env);
+      assert.strictEqual(r.stdout, '', `${cmd} -> ${r.stdout}`);
+    }
+  });
+
+  test('the installed wrapper runs the script on this OS and its pinned EXPLAINIT_HOME wins over the environment', async function () {
+    const wrapHome = path.join(root, 'wrap-home');
+    const hooksDir = path.join(wrapHome, 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const script = path.join(hooksDir, 'explainit-hook.js');
+    fs.copyFileSync(HOOK_SCRIPT, script);
+    const runtime = resolveNodeRuntime();
+    const written = writeWrappers(hooksDir, runtime, script, wrapHome);
+    writeSession(wrapHome, stub, [proj]);
+    stub.handler = decideWith({ permissionDecision: 'allow' });
+    const rogue = path.join(root, 'wrap-rogue');
+    fs.mkdirSync(path.join(rogue, 'sessions'), { recursive: true });
+    const win = process.platform === 'win32';
+    const cmd = win ? 'cmd.exe' : 'sh';
+    const args = win ? ['/c', written.cmd.path, '--agent', 'claude', '--watchdog', '5'] : [written.sh.path, '--agent', 'claude', '--watchdog', '5'];
+    const r = await new Promise<HookRun>((resolve) => {
+      const started = Date.now();
+      const child = spawn(cmd, args, { env: { ...process.env, EXPLAINIT_HOME: rogue }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+      child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+      child.on('close', (code) => resolve({ stdout, stderr, code, ms: Date.now() - started }));
+      child.stdin.end(claudePayload('Write', { file_path: path.join(proj, 'src', 'app.py'), content: 'x' }));
+    });
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.deepStrictEqual(JSON.parse(r.stdout), { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'ExplainIT checkpoint: allow' } });
+    assert.strictEqual(stub.requests.length, 1, 'the session in the pinned home was used, not the rogue EXPLAINIT_HOME');
+    outputs.push(r);
   });
 
   test('--home overrides EXPLAINIT_HOME', async () => {

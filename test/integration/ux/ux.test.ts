@@ -54,11 +54,36 @@ suite('ux: commands', function () {
     assert.equal(a.gate.paused, true);
     assert.equal(a.state.read().checkpointPaused, true);
     assert.ok(ux.statusText().toLowerCase().includes('paused'), `status text: ${ux.statusText()}`);
+    assert.equal(ux.bannerVisible(), true, 'the paused banner must be showing while the checkpoint is paused');
     await vscode.commands.executeCommand('explainit.resumeCheckpoint');
     assert.equal(a.gate.paused, false);
     assert.equal(a.state.read().checkpointPaused, false);
     assert.ok(!ux.statusText().toLowerCase().includes('paused'), `status text: ${ux.statusText()}`);
     assert.ok(ux.statusText().includes('ExplainIT'));
+    assert.equal(ux.bannerVisible(), false, 'the paused banner must be gone after resume');
+  });
+
+  test('pause and resume both clear "accept the rest of this file/session" memory', async () => {
+    const a = await api();
+    const folder = vscode.workspace.workspaceFolders![0].uri.fsPath;
+    const file = path.join(folder, 'src', 'app.py');
+    const request = {
+      id: 'ux-memory-probe',
+      agent: 'claude' as const,
+      sessionId: 'ux-memory-session',
+      toolName: 'Write',
+      cwd: folder,
+      writes: [{ kind: 'modify' as const, path: file, before: 'a', after: 'b' }],
+      hunksByPath: { [file]: [] },
+      receivedAt: new Date().toISOString(),
+    };
+    a.memory.remember({ requestId: request.id, verdict: 'accept', scope: 'session', decidedAt: new Date().toISOString() }, request);
+    assert.equal(a.memory.lookup('claude', 'ux-memory-session', file, 'any-hunk'), 'accept', 'a session-wide acceptance is remembered');
+    await vscode.commands.executeCommand('explainit.pauseCheckpoint');
+    assert.equal(a.memory.lookup('claude', 'ux-memory-session', file, 'any-hunk'), undefined, 'pausing forgets it');
+    a.memory.remember({ requestId: request.id, verdict: 'accept', scope: 'session', decidedAt: new Date().toISOString() }, request);
+    await vscode.commands.executeCommand('explainit.resumeCheckpoint');
+    assert.equal(a.memory.lookup('claude', 'ux-memory-session', file, 'any-hunk'), undefined, 'resuming forgets it too');
   });
 
   test('showPausedBanner and setHeartbeat drive the status bar', async () => {
@@ -107,9 +132,14 @@ suite('ux: commands', function () {
     assert.ok(listening, 'listening check present');
     const health = report.checks.find((c) => c.name === 'Checkpoint answers over HTTP');
     assert.ok(health, 'health check present');
+    const wiring = report.checks.find((c) => c.name === 'Hook wiring live test');
+    assert.ok(wiring, 'hook wiring live test present');
     if (a.gate.info && !a.gate.paused) {
       assert.equal(listening!.ok, true, listening!.detail);
       assert.equal(health!.ok, true, health!.detail);
+      // The real hook (through the installed wrapper when one exists, else the script) must reach this
+      // window's checkpoint and get an answer for a synthetic twin-file write.
+      assert.equal(wiring!.ok, true, wiring!.detail);
     }
     assert.deepEqual(a.ux.lastDoctorReport(), report);
     // The command form works too and produces a fresh report.

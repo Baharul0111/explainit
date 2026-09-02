@@ -377,6 +377,19 @@ suite('ux/pure/doctorChecks', () => {
     assert.ok(none.detail.includes('Skipped'));
   });
 
+  test('hook wiring: uses the installed wrapper when present and says so in the detail', async () => {
+    const wrapper = '/home/pat/.explainit/hooks/explainit-hook.sh';
+    const viaWrapper = await checkHookWiring(healthyDeps({ hookLiveTest: async () => ({ answered: true, decision: 'allow', via: `through the installed wrapper ${wrapper}` }) }));
+    assert.equal(viaWrapper.ok, true);
+    assert.ok(viaWrapper.detail.includes(wrapper), viaWrapper.detail);
+    assert.ok(viaWrapper.detail.includes('installed wrapper'), viaWrapper.detail);
+    const viaScript = await checkHookWiring(healthyDeps({ hookLiveTest: async () => ({ answered: false, problem: 'printed nothing', via: 'by running the hook script directly (/ext/hooks/explainit-hook.js) because no wrapper is installed yet' }) }));
+    assert.equal(viaScript.ok, false);
+    assert.ok(viaScript.detail.includes('no wrapper is installed'), viaScript.detail);
+    assert.ok(viaScript.detail.includes('printed nothing'));
+    assert.ok(!viaScript.detail.includes('undefined'));
+  });
+
   test('journal and restore self-test per kit', async () => {
     const good = healthyDeps().kits[0];
     assert.equal((await checkJournal(good)).ok, true);

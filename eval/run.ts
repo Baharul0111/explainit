@@ -24,7 +24,7 @@ import { createLogger, type Logger } from '../src/core/log';
 import { inMemorySettings, type Settings } from '../src/core/settings';
 import { createFileCache, createGenerationRouter } from '../src/generation';
 import { parseArgs, USAGE, type EvalArgs } from './pure/args';
-import { compareNewestToPrevious, updateBaseline, validateBaseline, type Baseline, type EvalChannelName } from './pure/baseline';
+import { compareNewest, updateBaseline, validateBaseline, type Baseline, type EvalChannelName } from './pure/baseline';
 import { buildTestProgram, functionTextForExplain, parseSubset, preambleForContext, splitPrompt, type HumanEvalProblem } from './pure/humaneval';
 import { fileStamp, formatProblems, formatTable, summarize, toChannelScore, type ProblemResult, type RunSummary } from './pure/report';
 import { EVAL_PATHS, packageVersion, repoRoot } from './paths';
@@ -279,7 +279,7 @@ function updateBaselineFile(summary: RunSummary, promptHash: string, logger: Log
   const existing = readBaseline(file, logger);
   const channel = summary.channel as EvalChannelName;
   const updated = updateBaseline(existing, channel, toChannelScore(summary), promptHash);
-  const regression = compareNewestToPrevious(updated.history);
+  const regression = compareNewest(updated.history);
   if (existing && existing.promptHash !== promptHash) {
     process.stdout.write(`prompt hash changed: ${existing.promptHash.slice(0, 12)}… -> ${promptHash.slice(0, 12)}… (other channels' scores were measured with the old prompts until they are re-run)\n`);
   }

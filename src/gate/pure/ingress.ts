@@ -24,6 +24,11 @@ export interface IngressOk {
   toolName: string;
   category: ToolCategory;
   toolUseId?: string;
+  /**
+   * The session id the assistant reported, or '' when it sent none (or a blank one). A request
+   * without a session id gets NO decision memory: it can neither use nor create "accept the rest"
+   * acceptances, so nothing is ever shared through a made-up or missing id (security review F3).
+   */
   sessionId: string;
   cwd: string;
   toolInput: Record<string, unknown>;
@@ -204,7 +209,7 @@ export function validateEnvelope(body: unknown): IngressResult {
     toolName,
     category,
     toolUseId: typeof p.tool_use_id === 'string' ? p.tool_use_id : undefined,
-    sessionId: typeof p.session_id === 'string' && p.session_id ? p.session_id : 'unknown-session',
+    sessionId: typeof p.session_id === 'string' && p.session_id.trim() ? p.session_id : '',
     cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
     toolInput,
     hookVersion: e.hookVersion,
@@ -238,6 +243,22 @@ export function commandText(toolInput: Record<string, unknown>): string {
   const c = toolInput.command ?? toolInput.cmd;
   if (Array.isArray(c)) return c.map((x) => String(x)).join(' ');
   return typeof c === 'string' ? c : '';
+}
+
+const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'dash', 'cmd', 'powershell', 'pwsh']);
+
+/**
+ * The script to analyse for shell heuristics. Codex sends argv arrays such as
+ * `['bash', '-lc', '<script>']`; joining those with spaces loses the quoting and lets `;` inside the
+ * script split the `bash -lc` prefix from its own commands, so the inner script is returned as is.
+ */
+export function commandForAnalysis(toolInput: Record<string, unknown>): string {
+  const c = toolInput.command ?? toolInput.cmd;
+  if (Array.isArray(c) && c.length >= 3) {
+    const shell = String(c[0]).replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, '');
+    if (SHELL_NAMES.has(shell) && /^-(l?c|Command)$/i.test(String(c[1]))) return String(c[2]);
+  }
+  return commandText(toolInput);
 }
 
 /** The path an agent write targets (Claude tools and Codex Write/Edit). */

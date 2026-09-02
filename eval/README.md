@@ -47,7 +47,13 @@ Each run writes `results/<channel>-<timestamp>.json` (ignored by git) and prints
 - `router.promptHash()` differs from `baseline.promptHash` — *Prompts changed without re-running the
   eval: run npm run eval -- --channel <c> --update-baseline*, or
 - for any channel present in the two newest history entries, `passAt1` or `style` went down —
-  *Explanation quality dropped for <channel>: … refusing this prompt change.*
+  *Explanation quality dropped for <channel>: … refusing this prompt change.*, or
+- for any channel in the newest entry, `passAt1` or `style` is below the best value any earlier
+  history entry recorded for it **under the same `promptHash`** (`compareNewestToBest`) —
+  *Explanation quality for <channel> is below the best run with these prompts: … refusing this
+  prompt change.* This is what stops a sequence of small drops: 12/12 -> 11/12 -> 11/12 passes the
+  previous-run check on the last step but not the best-run check. A prompt change resets the bar
+  (entries measured with other prompts are ignored).
 
 `style.test.ts` runs the style checker against the recorded explanations in `fixtures/explanations.json`
 (well-formed ones plus deliberately bad ones marked `expectedStyleOk: false`).

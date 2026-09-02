@@ -7,7 +7,7 @@
  *
  * A VSIX is a zip file; this reads its central directory with plain Node (no dependencies) and checks:
  *   - required entries are present (manifest, package.json, dist/extension.js, the tree-sitter wasm
- *     folder, the hook script, the runbooks)
+ *     folder, the hook script, the review panel's media/review/review.js + review.css, the runbooks)
  *   - no entry comes from a forbidden folder or matches a forbidden pattern (src/, test/, eval/, out/,
  *     out-<anything>/, node_modules/, scripts/, .github/, .vscode-test/, .env files, *.vsix, *.log, *.ts)
  *   - the file count and total uncompressed size are within sane limits
@@ -20,7 +20,17 @@
 const fs = require('fs');
 const path = require('path');
 
-const REQUIRED_ENTRIES = ['extension.vsixmanifest', '[Content_Types].xml', 'extension/package.json', 'extension/dist/extension.js', 'extension/hooks/explainit-hook.js'];
+// The review webview loads media/review/review.js + review.css at runtime: without them the
+// checkpoint panel is blank and nobody can accept or reject a change, so the package must carry them.
+const REQUIRED_ENTRIES = [
+  'extension.vsixmanifest',
+  '[Content_Types].xml',
+  'extension/package.json',
+  'extension/dist/extension.js',
+  'extension/hooks/explainit-hook.js',
+  'extension/media/review/review.js',
+  'extension/media/review/review.css',
+];
 const REQUIRED_PREFIXES = ['extension/dist/wasm/', 'extension/docs/runbooks/'];
 /** Any entry starting with one of these (after "extension/") must not ship. */
 const FORBIDDEN_DIRS = ['src/', 'test/', 'eval/', 'out/', 'node_modules/', 'scripts/', '.github/', '.vscode/', '.vscode-test/', '.workflows/', 'coverage/'];

@@ -11,12 +11,12 @@ import type { CancelToken, Disposable, GateDeps, HookEnvelope, Listener, SafetyK
 import type { AgentKind, ChangeExplanation, Decision, FunctionHunk, FunctionMap, GateRequest, HookDecision, ProposedWrite } from '../core/types';
 import { CancelSource, withTimeout } from '../core/cancel';
 import { sha256, normalizeNewlines, randomId } from '../core/hash';
-import { explainitHome, canonicalPath } from '../core/paths';
+import { explainitHome, canonicalPath, isInside } from '../core/paths';
 import { recordLanding } from '../core/landing';
-import { validateEnvelope, resolveTarget, commandText, targetPathOf, type IngressOk } from './pure/ingress';
+import { validateEnvelope, resolveTarget, commandText, commandForAnalysis, targetPathOf, type IngressOk } from './pure/ingress';
 import { buildClaudeWrites, buildPatchWrites, proposalSize, type ProposalIo } from './pure/proposals';
 import { extractPatchText, parsePatch } from './pure/applyPatch';
-import { checkWritePolicy, protectedPathMentioned, protectedMentionReason, type PolicyContext } from './pure/policy';
+import { checkWritePolicy, protectedPathMentioned, protectedMentionReason, protectedShellReason, shellProtectedTarget, type PolicyContext } from './pure/policy';
 import { analyseCommand, shellWriteReason } from './pure/shell';
 import { computeHunks, reconstruct } from './pure/differ';
 import { detectEol, languageIdForPath, withEol } from './pure/text';
@@ -24,6 +24,12 @@ import { detectEol, languageIdForPath, withEol } from './pure/text';
 export const REVIEW_SIZE_CAP = 2 * 1024 * 1024;
 /** Files larger than this are never read into memory for a proposal (the hook body cap is 8 MB too). */
 export const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
+/**
+ * How many changes from one assistant session may wait for a human at the same time (security
+ * review F7). Beyond that the gate answers `ask` (the agent's own prompt) instead of opening yet
+ * another review, so a runaway or hostile session cannot pile up work or exhaust memory.
+ */
+export const MAX_PENDING_PER_SESSION = 20;
 const STRUCTURE_TIMEOUT_MS = 20_000;
 const TWIN_UPDATE_TIMEOUT_MS = 180_000;
 const POST_FALLBACK_MS = 10_000;
@@ -97,10 +103,17 @@ export function normalizeVerdict(decision: Decision, hunks: FunctionHunk[]): 'ac
 export class GateController {
   private _paused = false;
   private pendingHuman = 0;
+  /** Reviews waiting for a human, per assistant session (`<agent> <sessionId>`). */
+  private readonly pendingBySession = new Map<string, number>();
   private readonly requestListeners = new Set<Listener<GateRequest>>();
   private readonly log;
-  /** allowed writes awaiting the agent's PostToolUse: path -> expected hash + fallback timer. */
-  private readonly expected = new Map<string, { hash: string | null; requestId: string; timer: NodeJS.Timeout }>();
+  /**
+   * Allowed writes awaiting the agent's PostToolUse: path -> expected hash + fallback timer. Only
+   * paths in this map are honoured when a PostToolUse arrives (security review F5): the agent can
+   * read the session token, so a forged PostToolUse must never make the gate journal an "applied"
+   * write, record a landing or regenerate a twin for a path nobody allowed.
+   */
+  private readonly expected = new Map<string, { hash: string | null; requestId: string; timer: NodeJS.Timeout; twin: boolean }>();
   private disposed = false;
 
   constructor(private readonly deps: ControllerDeps) {
@@ -112,7 +125,15 @@ export class GateController {
     return this._paused;
   }
   setPaused(v: boolean): void {
-    if (this._paused !== v) this.log.info(v ? 'checkpoint paused (kill switch)' : 'checkpoint resumed');
+    if (this._paused !== v) {
+      this.log.info(v ? 'checkpoint paused (kill switch)' : 'checkpoint resumed');
+      // Pausing or resuming is a fresh start: no "accept the rest" decision survives it (F3).
+      try {
+        this.deps.memory.clearAll();
+      } catch (e) {
+        this.log.warn('could not clear decision memory', e);
+      }
+    }
     this._paused = v;
   }
   get pending(): number {
@@ -214,7 +235,12 @@ export class GateController {
         return deny('Twin files are written by ExplainIT; edit the code instead');
       }
     }
-    if (twinWrites.length === writes.length) return allow();
+    if (twinWrites.length === writes.length) {
+      // Fast path the Doctor relies on. Once the write lands, ExplainIT re-renders the twin from its
+      // own cache/sidecar (F8), so a planted twin can never be the one the person ends up reading.
+      for (const w of twinWrites) this.expectLanding(w.path, hashText(w.after), requestId, true);
+      return allow();
+    }
     const codeWrites = writes.filter((w) => !twinWrites.includes(w));
 
     // Protected paths: deny first, .git asks after a warning. Every write carries the FULL before /
@@ -259,11 +285,16 @@ export class GateController {
   private handleShell(v: IngressOk, ctx: PolicyContext): HookDecision {
     const cmd = commandText(v.toolInput);
     if (!cmd.trim()) return NONE;
+    // Protected paths are refused in EVERY shellWrites mode: first by text (any spelling of a
+    // protected path), then by following cd / pushd and resolving redirect, tee and heredoc targets
+    // against the directory each segment runs in (security review F4).
     const mentioned = protectedPathMentioned(cmd, ctx);
     if (mentioned) return deny(protectedMentionReason(mentioned));
+    const analysis = analyseCommand(commandForAnalysis(v.toolInput), { cwd: v.cwd, home: ctx.userHome });
+    const hit = shellProtectedTarget(analysis, ctx);
+    if (hit) return deny(protectedShellReason(hit));
     const mode = this.deps.settings.get('gateShellWrites');
     if (mode === 'ignore') return NONE;
-    const analysis = analyseCommand(cmd);
     if (!analysis.writes) return NONE;
     const reason = shellWriteReason(analysis, v.agent);
     return mode === 'deny' ? deny(reason) : ask(reason);
@@ -290,38 +321,68 @@ export class GateController {
     }
     for (const p of paths) {
       const exp = this.expected.get(p);
-      if (exp) {
-        clearTimeout(exp.timer);
-        this.expected.delete(p);
-      }
-      // Only writes we could have reviewed are journaled; twin files are ExplainIT's own output.
-      if (!exp && resolveTarget(p, v.cwd, folders).confinement === 'outside') continue;
-      recordLanding(p);
-      if (this.deps.twin.isTwinPath(p)) continue;
-      const onDisk = hashText(readFileOrNull(p));
-      const note = exp ? (exp.hash === onDisk ? 'match' : 'mismatch') : 'unexpected';
-      try {
-        await this.kitFor(p).journal.append({
-          kind: 'applied',
-          requestId: exp?.requestId ?? requestId,
+      if (!exp) {
+        // Not a write this gate allowed (or its window passed). The agent holds the session token,
+        // so this could be forged: note it in the journal and do nothing else (F5). Paths outside
+        // every workspace folder have no journal to note it in.
+        if (resolveTarget(p, v.cwd, folders).confinement === 'outside') continue;
+        this.log.info(`${requestId} PostToolUse for ${p} was not expected; ignored`);
+        await this.journal(p, {
+          kind: 'system',
+          requestId,
           agent: v.agent,
           path: p,
-          afterHash: onDisk,
-          note: `agent wrote the file; on-disk content ${note}${note === 'mismatch' ? ' (differs from what was reviewed)' : ''}`,
+          note: 'PostToolUse for a write ExplainIT had not allowed; ignored (no landing recorded, no twin update)',
         });
-      } catch (e) {
-        this.log.warn(`${requestId} journal append failed`, e);
+        continue;
       }
-      if (note === 'mismatch') this.log.warn(`${requestId} ${p}: on-disk content differs from the reviewed proposal`);
-      this.updateTwin(p, requestId);
+      clearTimeout(exp.timer);
+      this.expected.delete(p);
+      await this.landed(p, exp, v.agent, 'agent wrote the file');
     }
     return NONE;
+  }
+
+  /** An allowed write has landed (PostToolUse, or the fallback timer saw it). */
+  private async landed(p: string, exp: { hash: string | null; requestId: string; twin: boolean }, agent: AgentKind | undefined, how: string): Promise<void> {
+    recordLanding(p);
+    if (exp.twin) {
+      // A twin an assistant wrote is never the final word: re-render it from ExplainIT's own
+      // cache / sidecar (zero model cost for unchanged functions) so the person reads our text (F8).
+      await this.journal(p, { kind: 'system', requestId: exp.requestId, agent, path: p, note: 'twin written by an assistant; re-rendered by ExplainIT' });
+      let source: string | undefined;
+      try {
+        source = await this.deps.twin.sourcePathForTwin(p);
+      } catch (e) {
+        this.log.warn(`${exp.requestId} could not find the source file for the twin ${p}`, e);
+      }
+      if (source) this.updateTwin(source, exp.requestId);
+      else this.log.warn(`${exp.requestId} no source file found for the twin ${p}; it was not re-rendered`);
+      return;
+    }
+    const onDisk = hashText(readFileOrNull(p));
+    const note = exp.hash === onDisk ? 'match' : 'mismatch';
+    await this.journal(p, {
+      kind: 'applied',
+      requestId: exp.requestId,
+      agent,
+      path: p,
+      afterHash: onDisk,
+      note: `${how}; on-disk content ${note}${note === 'mismatch' ? ' (differs from what was reviewed)' : ''}`,
+    });
+    if (note === 'mismatch') this.log.warn(`${exp.requestId} ${p}: on-disk content differs from the reviewed proposal`);
+    this.updateTwin(p, exp.requestId);
   }
 
   private updateTwin(p: string, requestId: string): void {
     void withTimeout(this.deps.twin.updateAfterChange(p), TWIN_UPDATE_TIMEOUT_MS, 'twin update').catch((e) =>
       this.log.warn(`${requestId} twin update failed for ${p}`, e),
     );
+  }
+
+  /** Key for the per-session pending cap; a missing session id shares one bucket per agent. */
+  private sessionBucket(v: IngressOk): string {
+    return `${v.agent} ${v.sessionId || '-'}`;
   }
 
   private async functionMap(text: string | null, languageId: string, p: string, requestId: string): Promise<FunctionMap | undefined> {
@@ -378,11 +439,30 @@ export class GateController {
     }
 
     // Decision memory: "accept rest of file/session" or identical accepted hunks cover everything.
-    const covered = writes.every((w) => hunksByPath[w.path].every((h) => this.deps.memory.lookup(v.agent, v.sessionId, w.path, h.id) === 'accept'));
+    // Only a request that carries a session id may use memory (F3): ExplainIT cannot verify the id
+    // the assistant reports, so a request with none gets no memory at all rather than a shared bucket.
+    const sessionKnown = v.sessionId !== '';
+    const covered = sessionKnown && writes.every((w) => hunksByPath[w.path].every((h) => this.deps.memory.lookup(v.agent, v.sessionId, w.path, h.id) === 'accept'));
     if (covered) {
-      const decision: Decision = { requestId, verdict: 'auto', scope: 'session', decidedAt: new Date().toISOString(), reason: 'covered by an earlier "accept the rest" decision' };
+      const decision: Decision = {
+        requestId,
+        verdict: 'auto',
+        scope: 'session',
+        decidedAt: new Date().toISOString(),
+        reason: `covered by an earlier "accept the rest" decision in assistant session ${v.sessionId} (ExplainIT trusts the session id the assistant reports; such decisions expire after 30 minutes without use)`,
+      };
       await this.commitAccepted(request, decision);
       return allow();
+    }
+
+    // Per-session cap on reviews waiting for a human (F7): beyond it the agent's own prompt decides.
+    const bucket = this.sessionBucket(v);
+    const waiting = this.pendingBySession.get(bucket) ?? 0;
+    if (waiting >= MAX_PENDING_PER_SESSION) {
+      this.log.warn(`${requestId} ${bucket} already has ${waiting} change(s) waiting for review; answering ask`);
+      return ask(
+        `ExplainIT already has ${waiting} changes from this assistant session waiting for the person to review. Decide on those first; this change goes to your normal permission prompt.`,
+      );
     }
 
     for (const w of writes) {
@@ -407,11 +487,15 @@ export class GateController {
 
     const cancel = new CancelSource();
     this.pendingHuman++;
+    this.pendingBySession.set(bucket, waiting + 1);
     let decision: Decision;
     try {
       decision = await this.deps.review.review(request, (hunk, onText, token) => this.explain(request, hunk, onText, token), { token: cancel.token });
     } finally {
       this.pendingHuman--;
+      const left = (this.pendingBySession.get(bucket) ?? 1) - 1;
+      if (left <= 0) this.pendingBySession.delete(bucket);
+      else this.pendingBySession.set(bucket, left);
     }
     if (this.disposed) return ask('ExplainIT was shut down during the review. Your normal permission prompt decides.');
 
@@ -489,22 +573,41 @@ export class GateController {
   }
 
   /** If the agent's PostToolUse never arrives, check the disk ourselves after a grace period. */
-  private expectLanding(p: string, hash: string | null, requestId: string): void {
+  private expectLanding(p: string, hash: string | null, requestId: string, twin = false): void {
     const prev = this.expected.get(p);
     if (prev) clearTimeout(prev.timer);
     const timer = setTimeout(() => {
       this.expected.delete(p);
       const onDisk = hashText(readFileOrNull(p));
-      if (onDisk === hash) {
-        recordLanding(p);
-        void this.journal(p, { kind: 'applied', requestId, path: p, afterHash: onDisk, note: 'no PostToolUse received; on-disk content matches the reviewed proposal' });
-        this.updateTwin(p, requestId);
+      // A twin is re-rendered whatever landed (F8); a code write only counts when it matches the review.
+      if (onDisk !== null && (twin || onDisk === hash)) {
+        void this.landed(p, { hash, requestId, twin }, undefined, 'no PostToolUse received').catch((e) => this.log.warn(`${requestId} landing handling failed for ${p}`, e));
       } else {
         this.log.info(`${requestId} ${p}: accepted write has not landed after ${POST_FALLBACK_MS / 1000}s`);
       }
     }, POST_FALLBACK_MS);
     timer.unref?.();
-    this.expected.set(p, { hash, requestId, timer });
+    this.expected.set(p, { hash, requestId, timer, twin });
+  }
+
+  /**
+   * Immediately before the gate writes a partially accepted file itself (F10): the path was
+   * canonicalised when the proposal was built, and the review may have taken minutes. If it now
+   * resolves elsewhere (a symlink appeared, a parent folder was swapped) or has left every workspace
+   * folder, nothing is written. Returns the problem in plain English, or undefined when all is well.
+   */
+  private pathStillSafe(p: string): string | undefined {
+    try {
+      const st = fs.lstatSync(p, { throwIfNoEntry: false });
+      if (st?.isSymbolicLink()) return 'it is now a symbolic link';
+    } catch {
+      /* unreadable: canonicalPath below decides */
+    }
+    const now = canonicalPath(p);
+    if (now !== p) return `it now resolves to "${now}"`;
+    const folders = this.deps.workspaceFolders();
+    if (!folders.some((f) => isInside(f, now))) return 'it is no longer inside a workspace folder';
+    return undefined;
   }
 
   /** Partial acceptance: the gate lands the accepted hunks itself and denies the agent's write. */
@@ -537,6 +640,15 @@ export class GateController {
       const checkpointId = await this.checkpoint(w, request.id, request.agent);
       const rel = path.relative(process.cwd(), w.path);
       const eol = detectEol(w.before ?? w.after);
+      // Re-validate the real path right before touching the disk (F10).
+      const unsafe = this.pathStillSafe(w.path);
+      if (unsafe) {
+        this.log.warn(`${request.id} ${w.path} is not safe to write any more: ${unsafe}; nothing was written`);
+        await this.journal(w.path, { kind: 'decided', requestId: request.id, agent: request.agent, path: w.path, decision, checkpointId, beforeHash: hashText(w.before), note: `partial acceptance not applied: the path changed during the review (${unsafe})` });
+        return deny(
+          `Partly accepted by the person, but ${path.basename(w.path)} moved while the review was open (${unsafe}), so ExplainIT did not write anything. Re-read the file and propose the change again.`,
+        );
+      }
       if (w.after === null && rejectedHere.length === 0) {
         fs.rmSync(w.path, { force: true });
         this.log.info(`${request.id} deleted ${rel} (accepted delete)`);

@@ -102,8 +102,17 @@ export function fakeTwin(): TwinEngine & { updated: string[] } {
     async twinPathFor(p: string) {
       return p.replace(/\.[^.]+$/, '') + '_explain.txt';
     },
-    async sourcePathForTwin() {
-      return undefined;
+    async sourcePathForTwin(p: string) {
+      // Inverse of twinPathFor: the sibling whose stem matches `<stem>_explain.txt`.
+      const base = path.basename(p);
+      if (!base.endsWith('_explain.txt')) return undefined;
+      const stem = base.slice(0, -'_explain.txt'.length);
+      try {
+        const hit = fs.readdirSync(path.dirname(p)).find((n) => n !== base && n.replace(/\.[^.]+$/, '') === stem);
+        return hit ? path.join(path.dirname(p), hit) : undefined;
+      } catch {
+        return undefined;
+      }
     },
     isTwinPath: (p: string) => path.basename(p).endsWith('_explain.txt'),
     async ensureTwin() {
@@ -207,21 +216,23 @@ export function fakeReview(script: ReviewScript): ReviewPresenter & { requests: 
   return r as unknown as ReviewPresenter & { requests: GateRequest[]; explainErrors: Error[] };
 }
 
-export function fakeMemory(): DecisionMemory & { remembered: Decision[]; accepted: Set<string> } {
+export function fakeMemory(): DecisionMemory & { remembered: Decision[]; accepted: Set<string>; cleared: number } {
   const accepted = new Set<string>();
   const m = {
     remembered: [] as Decision[],
     accepted,
+    cleared: 0,
     lookup: (_a: string, _s: string, _p: string, hash: string) => (accepted.has(hash) ? ('accept' as const) : undefined),
     remember(decision: Decision) {
       m.remembered.push(decision);
     },
     clearSession() {},
     clearAll() {
+      m.cleared++;
       accepted.clear();
     },
   };
-  return m as unknown as DecisionMemory & { remembered: Decision[]; accepted: Set<string> };
+  return m as unknown as DecisionMemory & { remembered: Decision[]; accepted: Set<string>; cleared: number };
 }
 
 export function fakeAdapters(hookScript: string): AdapterManager {

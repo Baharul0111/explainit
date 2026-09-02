@@ -135,9 +135,56 @@ export function compareNewestToPrevious(history: HistoryEntry[]): RegressionRepo
   return { ok: problems.length === 0, problems, compared };
 }
 
-/** Would folding `score` into the baseline pass the regression check? (used by --update-baseline to warn) */
+/**
+ * Newest history entry versus the BEST score ever recorded under the same prompt hash: for every
+ * channel in the newest entry, passAt1 and style must be at least the highest value any earlier
+ * entry with that prompt hash recorded for that channel. This closes the gap the previous-run check
+ * leaves open: a drop followed by a smaller recovery (1.0 -> 0.83 -> 0.92) or a drop repeated in two
+ * runs passes "newest >= previous" but still sits below what the prompts have already proven they
+ * can do. Entries measured with other prompts are ignored (a prompt change legitimately resets the bar).
+ * Fewer than two entries under the current hash, or no shared channel, is a pass.
+ */
+export function compareNewestToBest(history: HistoryEntry[]): RegressionReport {
+  if (!Array.isArray(history) || history.length < 2) return { ok: true, problems: [], compared: [] };
+  const newest = history[history.length - 1];
+  const earlier = history.slice(0, -1).filter((h) => h && h.promptHash === newest.promptHash && h.scores && typeof h.scores === 'object');
+  const problems: string[] = [];
+  const compared: EvalChannelName[] = [];
+  for (const channel of Object.keys(newest.scores ?? {}) as EvalChannelName[]) {
+    const now = newest.scores[channel];
+    if (!now) continue;
+    let bestPass: ChannelScore | undefined;
+    let bestStyle: ChannelScore | undefined;
+    for (const h of earlier) {
+      const s = h.scores[channel];
+      if (!s) continue;
+      if (!bestPass || s.passAt1 > bestPass.passAt1) bestPass = s;
+      if (!bestStyle || s.style > bestStyle.style) bestStyle = s;
+    }
+    if (!bestPass || !bestStyle) continue;
+    compared.push(channel);
+    const drops: string[] = [];
+    if (now.passAt1 + EPSILON < bestPass.passAt1) drops.push(`pass@1 is ${fmt(now.passAt1)}, below the best run's ${fmt(bestPass.passAt1)} (${bestPass.ranAt})`);
+    if (now.style + EPSILON < bestStyle.style) drops.push(`style conformance is ${fmt(now.style)}, below the best run's ${fmt(bestStyle.style)} (${bestStyle.ranAt})`);
+    if (drops.length) {
+      problems.push(`Explanation quality for ${channel} is below the best run with these prompts: ${drops.join('; ')} (newest run ${now.ranAt}); refusing this prompt change.`);
+    }
+  }
+  return { ok: problems.length === 0, problems, compared };
+}
+
+/** Both regression checks together: newest versus previous, and newest versus the best run under the current prompts. */
+export function compareNewest(history: HistoryEntry[]): RegressionReport {
+  const previous = compareNewestToPrevious(history);
+  const best = compareNewestToBest(history);
+  const compared = [...previous.compared];
+  for (const c of best.compared) if (!compared.includes(c)) compared.push(c);
+  return { ok: previous.ok && best.ok, problems: [...previous.problems, ...best.problems], compared };
+}
+
+/** Would folding `score` into the baseline pass both regression checks? (used by --update-baseline to warn) */
 export function previewRegression(existing: Baseline | undefined, channel: EvalChannelName, score: ChannelScore, promptHash: string): RegressionReport {
-  return compareNewestToPrevious(updateBaseline(existing, channel, score, promptHash).history);
+  return compareNewest(updateBaseline(existing, channel, score, promptHash).history);
 }
 
 export interface StaleChannel {

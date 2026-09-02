@@ -8,8 +8,27 @@ import * as path from 'node:path';
 export const EXTENSION_ID = 'BaharulIslam.explainit';
 /** Commands the probe must find registered after ExplainIT activates. */
 export const REQUIRED_COMMANDS = ['explainit.openTwin', 'explainit.doctor', 'explainit.pauseCheckpoint'];
-/** Default wall-clock budget for the probe run (VS Code launch -> quit). */
-export const DEFAULT_PROBE_TIMEOUT_MS = 3 * 60 * 1000;
+/**
+ * Every step the probe (probe/extension.js) must record, by exact name. run.ts fails the run when
+ * one is missing from the result, so a probe that stops early (or a step that was quietly removed)
+ * is a FAIL with the step named, never a shorter list of green ticks. The probe carries the same
+ * strings as plain JS; smoke.test.ts checks the two lists stay in step.
+ */
+export const REQUIRED_STEPS = [
+  'ExplainIT is installed from the VSIX',
+  'ExplainIT activates and exports its API',
+  'Commands openTwin, doctor and pauseCheckpoint are registered',
+  'Checkpoint gate is listening on 127.0.0.1',
+  'Opens src/app.py',
+  'Twin app_explain.txt is written beside app.py with "1. load_config" explained by the assistant',
+  'Twin is open in an editor beside the code',
+  '.git/info/exclude contains *_explain.txt',
+  'Claude Code hook installs through the installed extension (wrapper, hook script and settings.json in the temp user home)',
+  'Installed hook: a Write that changes greet() is denied when the person rejects it, with the reason given, and app.py is unchanged',
+  'Installed hook: the same Write is allowed when the person accepts it, and a restore point for app.py was saved first',
+];
+/** Default wall-clock budget for the probe run (VS Code launch -> quit); the two checkpoint round trips add about a minute. */
+export const DEFAULT_PROBE_TIMEOUT_MS = 5 * 60 * 1000;
 /** Budget for one CLI command (install / list). */
 export const CLI_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -182,6 +201,11 @@ export interface ProbeEnvOptions {
   resultFile: string;
   workspaceDir: string;
   repoRoot: string;
+  /**
+   * Where the installed extension writes the assistants' user-layer config (~/.claude/settings.json):
+   * a folder inside the temp profile, so the smoke test never touches the person's real Claude settings.
+   */
+  userHome: string;
 }
 
 /** Environment for the VS Code process that runs the probe. Never leaks Electron-as-Node into the UI. */
@@ -191,6 +215,7 @@ export function probeEnv(base: NodeJS.ProcessEnv, o: ProbeEnvOptions): NodeJS.Pr
   delete env.NODE_OPTIONS;
   env.EXPLAINIT_TEST_MODE = '1';
   env.EXPLAINIT_HOME = o.home;
+  env.EXPLAINIT_USER_HOME = o.userHome;
   env.EXPLAINIT_TEST_ANSWERS = JSON.stringify({ consent: 'Allow' });
   env.EXPLAINIT_SMOKE_RESULT = o.resultFile;
   env.EXPLAINIT_SMOKE_WORKSPACE = o.workspaceDir;
@@ -294,6 +319,123 @@ export function hasTwinExcludeEntry(text: string | undefined): boolean {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Checkpoint round trip through the installed hook (mirrored as plain JS in probe/extension.js)
+// ---------------------------------------------------------------------------------------------
+
+/** The wrapper the installer writes for this platform, inside `<home>/hooks/`. */
+export function installedWrapperPath(home: string, platform: NodeJS.Platform): string {
+  return path.join(home, 'hooks', platform === 'win32' ? 'explainit-hook.cmd' : 'explainit-hook.sh');
+}
+
+export const HOOK_MARK = 'explainit-hook';
+
+/**
+ * The PreToolUse command ExplainIT wrote into `~/.claude/settings.json`: the entry whose command
+ * names the hook and is not the PostToolUse variant. Running that exact text through the shell is
+ * how Claude Code runs it, so the smoke test does the same instead of assembling its own command.
+ */
+export function hookCommandFromSettings(settingsText: string | undefined): { command?: string; problem?: string } {
+  if (settingsText === undefined) return { problem: 'settings.json does not exist' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(settingsText);
+  } catch (e) {
+    return { problem: `settings.json is not valid JSON: ${(e as Error).message}` };
+  }
+  const groups = (parsed as { hooks?: { PreToolUse?: unknown } } | null)?.hooks?.PreToolUse;
+  if (!Array.isArray(groups)) return { problem: 'settings.json has no hooks.PreToolUse list' };
+  for (const g of groups) {
+    const hooks = (g as { hooks?: unknown } | null)?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (const h of hooks) {
+      const command = (h as { command?: unknown } | null)?.command;
+      if (typeof command === 'string' && command.includes(HOOK_MARK) && !/--event\s+PostToolUse/.test(command)) return { command };
+    }
+  }
+  return { problem: `no PreToolUse entry whose command contains "${HOOK_MARK}"` };
+}
+
+export interface ShellInvocation {
+  command: string;
+  args: string[];
+  /** Hand the command line to cmd.exe verbatim (spawn must not re-quote it). */
+  windowsVerbatimArguments: boolean;
+}
+
+/**
+ * How to run a hook command line the way the agents do: `sh -c` on POSIX, `cmd.exe /d /s /c` on
+ * Windows. Only ever used with the command ExplainIT itself wrote into the settings file.
+ */
+export function shellInvocation(commandLine: string, platform: NodeJS.Platform, comSpec?: string): ShellInvocation {
+  if (platform === 'win32') return { command: comSpec && comSpec.trim() ? comSpec : 'cmd.exe', args: ['/d', '/s', '/c', `"${commandLine}"`], windowsVerbatimArguments: true };
+  return { command: 'sh', args: ['-c', commandLine], windowsVerbatimArguments: false };
+}
+
+/** The synthetic Claude Code PreToolUse payload for a Write, in the shape Claude Code sends on stdin. */
+export function claudeWritePayload(o: { cwd: string; filePath: string; content: string; sessionId: string; toolUseId: string }): Record<string, unknown> {
+  return {
+    session_id: o.sessionId,
+    transcript_path: path.join(o.cwd, '.transcript.jsonl'),
+    cwd: o.cwd,
+    permission_mode: 'default',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Write',
+    tool_input: { file_path: o.filePath, content: o.content },
+    tool_use_id: o.toolUseId,
+  };
+}
+
+export const GREET_BEFORE = 'message = "Hello, " + name';
+export const GREET_AFTER = 'message = "Hi there, " + name';
+
+/** app.py with one line inside greet() changed (one function hunk, one review card); undefined when the line is not there. */
+export function changeGreet(appPy: string | undefined): string | undefined {
+  if (!appPy || !appPy.includes(GREET_BEFORE)) return undefined;
+  return appPy.replace(GREET_BEFORE, GREET_AFTER);
+}
+
+export interface HookOutput {
+  decision?: 'allow' | 'deny' | 'ask';
+  reason?: string;
+  problem?: string;
+}
+
+/** The hook's stdout -> its decision. Empty stdout means "no opinion" (the agent's own flow), which is a problem here. */
+export function parseHookStdout(stdout: string | undefined): HookOutput {
+  const text = (stdout ?? '').trim();
+  if (!text) return { problem: 'the hook printed nothing, so the assistant would have used its own permission prompt (no ExplainIT decision)' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return { problem: `the hook printed something that is not JSON (${(e as Error).message}): ${text.slice(0, 200)}` };
+  }
+  const out = (parsed as { hookSpecificOutput?: { permissionDecision?: unknown; permissionDecisionReason?: unknown } } | null)?.hookSpecificOutput;
+  const decision = out?.permissionDecision;
+  if (decision !== 'allow' && decision !== 'deny' && decision !== 'ask') return { problem: `the hook printed no permissionDecision: ${text.slice(0, 200)}` };
+  return { decision, reason: typeof out?.permissionDecisionReason === 'string' ? out.permissionDecisionReason : undefined };
+}
+
+/** Restore points recorded for `fileName` in a checkpoints/index.json text (any workspace key). */
+export function checkpointsFor(indexText: string | undefined, fileName: string): { id: string; path: string; ts?: string }[] {
+  if (!indexText) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(indexText);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((c): c is { id: string; path: string; ts?: string } => !!c && typeof c === 'object' && typeof (c as { path?: unknown }).path === 'string' && path.basename((c as { path: string }).path) === fileName);
+}
+
+/** Names from REQUIRED_STEPS that the probe never recorded (a step that failed is present, so it is not "missing"). */
+export function missingRequiredSteps(result: ProbeResult | undefined, required: readonly string[] = REQUIRED_STEPS): string[] {
+  const seen = new Set((result?.steps ?? []).map((s) => s.name));
+  return required.filter((name) => !seen.has(name));
+}
+
+// ---------------------------------------------------------------------------------------------
 // One jittered retry (CONTRACTS: every external call has a timeout and at most one jittered retry)
 // ---------------------------------------------------------------------------------------------
 
@@ -342,6 +484,14 @@ export interface ProbeStep {
   ms?: number;
 }
 
+/** What the probe saw when it ran the installed hook once (raw, so run.ts can judge it again after VS Code quit). */
+export interface HookRunRecord {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  ms: number;
+}
+
 export interface ProbeResult {
   ok: boolean;
   startedAt?: string;
@@ -350,6 +500,8 @@ export interface ProbeResult {
   extensionVersion?: string;
   error?: string;
   steps: ProbeStep[];
+  /** The installed hook command and the two round trips (reject, then accept). */
+  hook?: { command?: string; wrapper?: string; reject?: HookRunRecord; accept?: HookRunRecord };
 }
 
 export function parseProbeResult(text: string | undefined): { result?: ProbeResult; problem?: string } {
@@ -471,6 +623,7 @@ export const USAGE = `ExplainIT fresh-install smoke test
 Downloads VS Code (cached in .vscode-test), installs the newest explainit-*.vsix from the repo root
 into a throw-away profile, checks it is listed, then launches VS Code with a tiny probe extension
 that drives ExplainIT end to end (activate, commands, open app.py, twin written by the fake
-assistant, .git/info/exclude) and quits. Prints PASS or FAIL with the reasons.
+assistant, .git/info/exclude, then installs the Claude Code hook and runs it against the checkpoint:
+one Write rejected, one accepted with a restore point) and quits. Prints PASS or FAIL with the reasons.
 
 Environment: VSCODE_TEST_VERSION, EXPLAINIT_SMOKE_KEEP=1 (keep temp dirs), CI (quieter download log).`;

@@ -14,6 +14,7 @@ export interface SettingsValues {
   codexCliPath: string;
   gateEnabled: boolean;
   gateWatchdogSeconds: number;
+  gateCodexUnresponsive: 'deny' | 'passthrough';
   gateShellWrites: 'deny' | 'ask' | 'ignore';
   gateBatchTrivial: boolean;
   gateAllowSessionAccept: boolean;
@@ -38,6 +39,7 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   codexCliPath: 'codex',
   gateEnabled: true,
   gateWatchdogSeconds: 120,
+  gateCodexUnresponsive: 'deny',
   gateShellWrites: 'deny',
   gateBatchTrivial: true,
   gateAllowSessionAccept: true,
@@ -63,6 +65,7 @@ export const SETTING_KEYS: Record<keyof SettingsValues, string> = {
   codexCliPath: 'assistant.codexCliPath',
   gateEnabled: 'checkpoint.enabled',
   gateWatchdogSeconds: 'checkpoint.watchdogSeconds',
+  gateCodexUnresponsive: 'checkpoint.codexUnresponsive',
   gateShellWrites: 'checkpoint.shellWrites',
   gateBatchTrivial: 'checkpoint.batchTrivialChanges',
   gateAllowSessionAccept: 'checkpoint.allowAcceptRestOfSession',

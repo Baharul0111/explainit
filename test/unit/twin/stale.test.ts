@@ -3,7 +3,7 @@ import { contentHashOf } from '../../../src/core/hash';
 import type { FunctionMap, FunctionRecord, TwinSection } from '../../../src/core/types';
 import { parseTwin } from '../../../src/twin/pure/parse';
 import { renderTwin } from '../../../src/twin/pure/render';
-import { fileSummaryOf, functionAtLine, functionText, matchPrevious, planSections, toRenderSections, toSidecarSections, type TwinSidecar } from '../../../src/twin/pure/stale';
+import { fileSummaryOf, functionAtLine, functionText, matchPrevious, outlineUnavailable, planSections, planWithoutOutline, previousSections, toRenderSections, toSidecarSections, type TwinSidecar } from '../../../src/twin/pure/stale';
 import { parseSidecar, serializeSidecar, validateSidecar } from '../../../src/twin/pure/sidecar';
 
 function fn(name: string, body: string, start = 0, ordinal = 0): FunctionRecord {
@@ -132,6 +132,39 @@ suite('twin/pure/stale (sidecar merge)', () => {
     assert.deepStrictEqual(planSections(mapOf(a, b), undefined, withPlaceholder, { kind: 'none' }).entries.map((e) => e.reason), ['changed', 'new']);
     // No twin and no sidecar: a fresh file.
     assert.deepStrictEqual(planSections(mapOf(a), undefined, undefined, { kind: 'changed' }).entries.map((e) => e.reason), ['new']);
+  });
+
+  test('when nothing could outline the file, the existing sections are kept (out of date when the source changed) instead of being wiped', () => {
+    const { sidecar, parsed } = existing([a, b], [false, true]);
+    const none: FunctionMap = { fileUri: 'file:///w/app.py', languageId: 'fortran', functions: [], source: 'none', textHash: 'new' };
+    assert.strictEqual(outlineUnavailable(none, previousSections(sidecar, parsed)), true);
+    assert.strictEqual(outlineUnavailable({ ...none, source: 'tree-sitter' }, sidecar.sections), false, 'a positive "no functions" answer is not ignorance');
+    assert.strictEqual(outlineUnavailable(none, []), false, 'nothing to keep');
+    assert.strictEqual(outlineUnavailable(mapOf(a), sidecar.sections), false);
+    assert.deepStrictEqual(previousSections(undefined, parsed).map((s) => s.name), ['a', 'b']);
+
+    // Unchanged source: every section keeps its words and its flag; nothing is generated.
+    const same = planWithoutOutline(none, sidecar, parsed, false);
+    assert.strictEqual(same.toGenerate.length, 0);
+    assert.deepStrictEqual(toRenderSections(same, new Map()), [
+      { name: 'a', content: content('a'), stale: false },
+      { name: 'b', content: content('b'), stale: true },
+    ]);
+    // Changed source: nobody can tell which function changed, so every section is out of date; words and hashes are kept.
+    const changed = planWithoutOutline(none, sidecar, parsed, true);
+    const render = toRenderSections(changed, new Map());
+    assert.deepStrictEqual(render, [
+      { name: 'a', content: content('a'), stale: true },
+      { name: 'b', content: content('b'), stale: true },
+    ]);
+    const sections = toSidecarSections(changed, new Map(), renderTwin('app.py', render).sections);
+    assert.deepStrictEqual(sections.map((s) => [s.index, s.functionId, s.name, s.contentHash, s.stale]), [[1, 'a#0', 'a', a.contentHash, true], [2, 'b#0', 'b', b.contentHash, true]]);
+    // No sidecar: sections are recovered from the twin text and read as out of date.
+    const recovered = planWithoutOutline(none, undefined, parsed, false);
+    assert.deepStrictEqual(recovered.entries.map((e) => [e.fn.id, e.stale, e.reason]), [['a#0', true, 'changed'], ['b#1', true, 'changed']]);
+    // A placeholder section has no words to keep.
+    const withPlaceholder = parseTwin(renderTwin('app.py', [{ name: 'a', content: content('a') }, { name: 'b', state: 'unavailable' }]).text);
+    assert.deepStrictEqual(toRenderSections(planWithoutOutline(none, undefined, withPlaceholder, true), new Map()), [{ name: 'a', content: content('a'), stale: true }]);
   });
 
   test('a hand-edited twin whose section names no longer match is regenerated rather than trusted', () => {

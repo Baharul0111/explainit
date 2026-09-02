@@ -20,6 +20,21 @@ First public release.
 - **Five runbooks** for the most likely problems, reachable from "ExplainIT: Help".
 - **Explanation quality eval** (HumanEvalExplain subset round trip) with a baseline lock so prompt changes cannot silently make explanations worse.
 
+### Security hardening (pre-release review)
+
+A security review that treated the assistant as a process running with your own account produced ten findings; the fixes below ship in this release, and the remaining risks are written down in `docs/dev/SECURITY-REVIEW.md`.
+
+- The installed hook command now pins the absolute ExplainIT home and the Claude / Codex config locations, and the wrappers export them before running the hook, so an assistant that edits a shell profile (`EXPLAINIT_HOME`, `HOME`, `CODEX_HOME`) can no longer point the hook at a rogue checkpoint or relocate the protected files. The pinned command is part of the integrity hash.
+- `.git/hooks/**` and `.git/config` are refused outright in the checkpoint and in the hook's own protected list (git runs them as you, outside ExplainIT). Other `.git/**` writes still go to the assistant's own prompt.
+- Shell commands are read with their working directory: `cd`/`pushd` into a protected folder followed by a redirect, `tee` or heredoc is caught, and a protected target is refused in every `checkpoint.shellWrites` mode.
+- "Accept the rest of this file/session" is never keyed on a shared fallback when the assistant reports no session id, expires after 30 minutes without use, and is cleared whenever the checkpoint is paused or resumed.
+- A `PostToolUse` report is honoured only for writes the checkpoint was expecting; anything else is journaled as a note and otherwise ignored.
+- At most 20 reviews can wait for a person per session; beyond that the assistant gets its own prompt.
+- A twin file an assistant writes itself is re-rendered by ExplainIT from its own cache after the write lands, with a journal note saying so.
+- New setting `explainit.checkpoint.codexUnresponsive` (`deny` by default): Codex has no "ask" answer, so when ExplainIT does not respond within the watchdog time the change is refused with a try-again reason instead of slipping through; `passthrough` restores Codex's own policy. Claude Code keeps falling back to its own prompt.
+- The Doctor's "Hook wiring live test" now runs the installed wrapper the same way the assistants do, and says which path it exercised.
+- The canonical path of a partially accepted file is checked again immediately before the accepted parts are written.
+
 ### Privacy
 
 - No backend, no accounts, no telemetry. Code goes only to the assistants you already use, under your existing agreements.

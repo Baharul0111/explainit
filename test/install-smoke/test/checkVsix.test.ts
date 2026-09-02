@@ -80,6 +80,8 @@ const GOOD = [
   'extension/dist/extension.js',
   'extension/dist/wasm/tree-sitter.wasm',
   'extension/hooks/explainit-hook.js',
+  'extension/media/review/review.js',
+  'extension/media/review/review.css',
   'extension/docs/runbooks/README.md',
   'extension/media/icon.png',
   'extension/README.md',
@@ -143,6 +145,23 @@ suite('scripts/check-vsix: content checks', () => {
     // An empty directory entry does not count as content.
     const onlyDir = checker.checkEntries(entries([...GOOD.filter((n) => !n.includes('wasm')), 'extension/dist/wasm/']));
     assert.ok(onlyDir.problems.some((p) => /nothing under extension\/dist\/wasm\//.test(p)));
+  });
+
+  test('the review panel media (review.js + review.css) are required: without them nobody can accept or reject a change', () => {
+    assert.ok(checker.REQUIRED_ENTRIES.includes('extension/media/review/review.js'));
+    assert.ok(checker.REQUIRED_ENTRIES.includes('extension/media/review/review.css'));
+    const noJs = checker.checkEntries(entries(GOOD.filter((n) => n !== 'extension/media/review/review.js')));
+    assert.equal(noJs.ok, false);
+    assert.ok(noJs.problems.some((p) => /missing extension\/media\/review\/review\.js/.test(p) && /npm run build/.test(p)), noJs.problems.join('\n'));
+    assert.ok(!noJs.problems.some((p) => /review\.css/.test(p)), 'only the missing file is reported');
+    const noCss = checker.checkEntries(entries(GOOD.filter((n) => n !== 'extension/media/review/review.css')));
+    assert.ok(noCss.problems.some((p) => /missing extension\/media\/review\/review\.css/.test(p)), noCss.problems.join('\n'));
+    // A file with the right name in the wrong folder does not count.
+    const misplaced = checker.checkEntries(entries([...GOOD.filter((n) => !n.includes('media/review/')), 'extension/media/review.js', 'extension/media/review.css']));
+    assert.equal(misplaced.problems.filter((p) => /media\/review\/review\.(js|css)/.test(p)).length, 2);
+    // The media files themselves are fine to ship (no false "must not ship").
+    assert.equal(checker.forbiddenReason('extension/media/review/review.js'), undefined);
+    assert.equal(checker.forbiddenReason('extension/media/review/review.css'), undefined);
   });
 
   test('sources, tests, scratch build folders, node_modules, .env and logs must not ship (grouped per top-level folder)', () => {
@@ -252,5 +271,7 @@ suite('scripts/check-vsix: driver', () => {
     assert.ok(entries.length > 0);
     assert.ok(entries.some((e) => e.name === 'extension/package.json'), 'has extension/package.json');
     assert.ok(entries.some((e) => e.name === 'extension/dist/extension.js'), 'has the bundle');
+    assert.ok(entries.some((e) => e.name === 'extension/media/review/review.js'), 'has the review panel script');
+    assert.ok(entries.some((e) => e.name === 'extension/media/review/review.css'), 'has the review panel stylesheet');
   });
 });

@@ -12,7 +12,7 @@ import { createLogger } from '../src/core/log';
 import { inMemorySettings } from '../src/core/settings';
 import { createGenerationRouter } from '../src/generation';
 import { EVAL_PATHS, repoRoot } from './paths';
-import { compareNewestToPrevious, parseBaselineText, promptChangedMessage, staleChannels, staleChannelsMessage, type Baseline } from './pure/baseline';
+import { compareNewestToBest, compareNewestToPrevious, parseBaselineText, promptChangedMessage, staleChannels, staleChannelsMessage, type Baseline } from './pure/baseline';
 
 function memoryCache(): ExplanationCache {
   const m = new Map();
@@ -71,6 +71,13 @@ suite('eval/baseline lock', () => {
     const newest = baseline.history[baseline.history.length - 1];
     assert.strictEqual(newest.promptHash, baseline.promptHash, 'the newest history entry was recorded with a different prompt hash than the baseline');
     const report = compareNewestToPrevious(baseline.history);
+    assert.ok(report.ok, report.problems.join('\n'));
+  });
+
+  test('explanation quality is not below the best run recorded with the current prompts (small drops cannot creep in one run at a time)', () => {
+    const baseline = loadBaseline();
+    assert.ok(baseline.history.length >= 1, 'the baseline has no history; run npm run eval -- --channel <c> --update-baseline');
+    const report = compareNewestToBest(baseline.history);
     assert.ok(report.ok, report.problems.join('\n'));
   });
 

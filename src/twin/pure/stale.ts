@@ -127,6 +127,45 @@ export function planSections(map: FunctionMap, sidecar: TwinSidecar | undefined,
   return { entries, toGenerate: entries.filter((e) => e.generate) };
 }
 
+/** The sections a previous twin holds: the sidecar's, or those recovered from the twin text. */
+export function previousSections(sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined): TwinSection[] {
+  return sidecar ? sidecar.sections : sectionsFromParsed(parsed);
+}
+
+/**
+ * True when nothing could outline the file this time (`source: 'none'`, no functions) although a twin with
+ * sections exists. That is ignorance, not "this file has no functions": a staleness pass has no AI
+ * segmentation, an assistant can be disconnected, an AI outline can time out. A positive "no functions"
+ * answer (a symbol provider or tree-sitter parsed the file and found none) has another source.
+ */
+export function outlineUnavailable(map: FunctionMap, previous: readonly TwinSection[]): boolean {
+  return map.source === 'none' && map.functions.length === 0 && previous.length > 0;
+}
+
+/**
+ * Plan for `outlineUnavailable`: every previous section is kept with its words, marked out of date when the
+ * source text changed (nothing can tell which function changed), and nothing is generated because there is
+ * no code range to send. Sections without recoverable words render as "not explained yet".
+ */
+export function planWithoutOutline(map: FunctionMap, sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined, sourceChanged: boolean): TwinPlan {
+  const entries: PlanEntry[] = previousSections(sidecar, parsed).map((s, i) => {
+    const fn: FunctionRecord = {
+      id: s.functionId || `${s.name}#${i}`,
+      name: s.name,
+      kind: 'other',
+      range: { startLine: 0, endLine: 0 },
+      contentHash: s.contentHash,
+      languageId: map.languageId,
+      source: 'none',
+    };
+    const content = contentFor(parsed, s);
+    const stale = content !== undefined && (s.stale || sourceChanged);
+    const reason: PlanReason = !content ? 'missing' : stale ? 'changed' : 'reuse';
+    return { fn, index: i + 1, previous: s, content, stale, generate: false, reason };
+  });
+  return { entries, toGenerate: [] };
+}
+
 /** Explanations produced for this run, keyed by function id. */
 export type ProducedContent = ReadonlyMap<string, SectionContent>;
 

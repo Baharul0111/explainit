@@ -8,6 +8,7 @@
 import * as path from 'node:path';
 import type { ProposedWrite } from '../../core/types';
 import { canonicalPath, isInside } from '../../core/paths';
+import type { ShellAnalysis } from './shell';
 
 export interface PolicyContext {
   /** ExplainIT home (`explainitHome()`): hooks, sessions, state, journal, checkpoints, logs. */
@@ -99,6 +100,19 @@ export function isGitInfoExclude(p: string): boolean {
   const parts = canonicalPath(p).split(/[\\/]+/);
   const n = parts.length;
   return n >= 3 && parts[n - 1] === 'exclude' && parts[n - 2] === 'info' && parts[n - 3] === '.git';
+}
+
+/**
+ * `.git/hooks/**` and `.git/config` (security review F2). Git runs hooks as the person, outside any
+ * ExplainIT review, and `config` can point `core.hooksPath` anywhere or define aliases that run
+ * commands, so both are denied outright rather than handed to the agent's own prompt.
+ */
+export function isGitHooksOrConfig(p: string): boolean {
+  const parts = canonicalPath(p).split(/[\\/]+/);
+  const i = parts.lastIndexOf('.git');
+  if (i < 0 || i >= parts.length - 1) return false;
+  if (parts[i + 1] === 'hooks') return true;
+  return parts.length === i + 2 && parts[i + 1] === 'config';
 }
 
 /**
@@ -263,6 +277,12 @@ export function checkWritePolicy(write: ProposedWrite, ctx: PolicyContext, opts:
         reason: `ExplainIT: "${p}" keeps the plain-English twin files out of git and may not be changed by an assistant. Leave it alone and continue with the task.`,
       };
     }
+    if (isGitHooksOrConfig(p)) {
+      return {
+        action: 'deny',
+        reason: `ExplainIT: "${p}" is a git hook or the git config. Git runs those as the person, outside any review, so assistants may not change them. Ask the person to change git hooks or git config themselves and continue with the task.`,
+      };
+    }
     if (isClaudeSettingsPath(p, ctx)) {
       if (write.kind === 'delete' || write.kind === 'move') {
         return { action: 'deny', reason: `ExplainIT: "${p}" holds the Claude Code hooks that power the ExplainIT checkpoint. It may not be deleted or moved by an assistant.` };
@@ -317,7 +337,22 @@ export function protectedPathMentioned(command: string, ctx: PolicyContext): str
   candidates.push(...variants(ctx.explainitHome));
   for (const e of ctx.extraProtected ?? []) if (e) candidates.push(...variants(e));
   // Relative/short forms agents are likely to type.
-  candidates.push('.explainit', 'explainit-hook', '.claude/settings', '.claude\\settings', '.codex/hooks', '.codex\\hooks', '.codex/config.toml', '.codex\\config.toml', '.git/info/exclude', '.git\\info\\exclude');
+  candidates.push(
+    '.explainit',
+    'explainit-hook',
+    '.claude/settings',
+    '.claude\\settings',
+    '.codex/hooks',
+    '.codex\\hooks',
+    '.codex/config.toml',
+    '.codex\\config.toml',
+    '.git/info/exclude',
+    '.git\\info\\exclude',
+    '.git/hooks',
+    '.git\\hooks',
+    '.git/config',
+    '.git\\config',
+  );
   for (const f of CODEX_FILES) candidates.push(...variants(path.join(codexHomeOf(ctx), f)));
   for (const r of [ctx.userHome, ...ctx.folders]) {
     for (const f of CLAUDE_SETTINGS) candidates.push(...variants(path.join(r, '.claude', f)));
@@ -332,4 +367,64 @@ export function protectedPathMentioned(command: string, ctx: PolicyContext): str
 
 export function protectedMentionReason(fragment: string): string {
   return `ExplainIT: this command mentions "${fragment}", which is part of the ExplainIT checkpoint (its hooks, settings, session files, journal or restore points). Assistants may not touch it. Leave it alone and continue with the task.`;
+}
+
+/**
+ * Would writing this path from a shell command touch something protected? Shell writes cannot be
+ * content-checked (there is no before/after to compare), so every protected file counts, not only
+ * hooks changes. Returns a short description of what the path is for the reason text.
+ */
+export function protectedShellFile(p: string, ctx: PolicyContext): string | undefined {
+  if (under(ctx.explainitHome, p)) return "ExplainIT's own folder (hook scripts, sessions, journal and restore points)";
+  for (const e of ctx.extraProtected ?? []) if (e && sameFile(e, p)) return 'the ExplainIT hook script';
+  if (isGitInfoExclude(p)) return '.git/info/exclude, which keeps the twin files out of git';
+  if (isGitHooksOrConfig(p)) return 'a git hook or the git config, which git runs outside any review';
+  if (isClaudeSettingsPath(p, ctx)) return 'the Claude Code settings that hold the ExplainIT hooks';
+  if (isCodexConfigPath(p, ctx)) return 'the Codex configuration that holds the ExplainIT hooks';
+  return undefined;
+}
+
+/**
+ * A directory an assistant's shell command may not change into (security review F4): the ExplainIT
+ * home, the user-layer `.claude` / `.codex` folders (and `$CODEX_HOME`), and any `.claude`, `.codex`,
+ * `.explainit` or `.git` folder at any depth. A command that starts there can write protected files
+ * with bare names (`cd ~/.claude && cat > settings.json`), so the cd itself is refused.
+ */
+export function isProtectedDirectory(dir: string, ctx: PolicyContext): boolean {
+  if (under(ctx.explainitHome, dir)) return true;
+  const roots = [path.join(ctx.userHome, '.claude'), path.join(ctx.userHome, '.codex'), codexHomeOf(ctx)];
+  if (roots.some((r) => under(r, dir))) return true;
+  const parts = norm(dir).split(/[\\/]+/);
+  return parts.some((s) => s === '.claude' || s === '.codex' || s === '.explainit' || s === '.git');
+}
+
+export interface ShellProtectedHit {
+  kind: 'directory' | 'file';
+  /** The resolved path that was hit. */
+  path: string;
+  /** What that path is, for the reason text (files only). */
+  what?: string;
+}
+
+/**
+ * Check a shell analysis (targets already resolved against the effective cwd) against the protected
+ * paths: a cd into a protected directory, or a redirect / tee / in-place write onto a protected file.
+ * Applies in every `checkpoint.shellWrites` mode: protection is never a matter of taste.
+ */
+export function shellProtectedTarget(analysis: Pick<ShellAnalysis, 'enteredDirs' | 'writeTargets'>, ctx: PolicyContext): ShellProtectedHit | undefined {
+  for (const d of analysis.enteredDirs) {
+    if (isProtectedDirectory(d, ctx)) return { kind: 'directory', path: d };
+  }
+  for (const t of analysis.writeTargets) {
+    const what = protectedShellFile(t, ctx);
+    if (what) return { kind: 'file', path: t, what };
+  }
+  return undefined;
+}
+
+export function protectedShellReason(hit: ShellProtectedHit): string {
+  if (hit.kind === 'directory') {
+    return `ExplainIT: this command changes into "${hit.path}", which holds files that keep the ExplainIT checkpoint working (hooks, settings, session files, journal or restore points). Assistants may not work inside it. Leave it alone and continue with the task.`;
+  }
+  return `ExplainIT: this command would write "${hit.path}", which is ${hit.what}. Assistants may not change it from a shell command. Leave it alone and continue with the task.`;
 }

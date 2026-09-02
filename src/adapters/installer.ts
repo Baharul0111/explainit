@@ -14,7 +14,7 @@ import { HOME_LAYOUT, ensureDir, explainitHome } from '../core/paths';
 import type { Settings } from '../core/settings';
 import type { AdapterRecord, StateStore } from '../core/state';
 import type { AgentKind } from '../core/types';
-import { entriesMatch, findOurEntries, parseJsonFile, removeOurEntries, stringifyJsonFile, upsertOurEntries, configHashFor, type HookEntrySpec } from './pure/hookConfig';
+import { entriesMatch, findOurEntries, parseJsonFile, removeOurEntries, stringifyJsonFile, upsertOurEntries, configHashFor, type HookEntrySpec, type HookPins } from './pure/hookConfig';
 import { cmdQuote, HOOK_SCRIPT, shQuote, wrapperNameFor } from './pure/wrappers';
 import { atomicWrite, resolveNodeRuntime, writeWrappers, type NodeRuntime } from './runtime';
 import { extensionRoots, pickExtensionDir, type ExtensionDir } from './pure/extensionDirs';
@@ -42,6 +42,27 @@ export interface AdapterEnv {
   codexHome?: string;
   platform: NodeJS.Platform;
   arch: string;
+}
+
+/** Codex keeps everything under CODEX_HOME when that is set, else ~/.codex (shared by the CLI and the VS Code extension). */
+export function codexHomeDir(env: Pick<AdapterEnv, 'userHome' | 'codexHome'>): string {
+  return env.codexHome ?? path.join(env.userHome, '.codex');
+}
+
+/** Claude Code's user-layer folder (settings.json, settings.local.json). */
+export function claudeHomeDir(env: Pick<AdapterEnv, 'userHome'>): string {
+  return path.join(env.userHome, '.claude');
+}
+
+/** The absolute locations baked into the hook command so the hook never trusts environment variables for them. */
+export function hookPins(env: AdapterEnv): HookPins {
+  return {
+    explainitHome: env.explainitHome,
+    claudeHome: claudeHomeDir(env),
+    codexHome: codexHomeDir(env),
+    platform: env.platform,
+    codexUnresponsive: env.settings.get('gateCodexUnresponsive') === 'passthrough' ? 'passthrough' : 'deny',
+  };
 }
 
 /** CODEX_HOME is honoured only for the real user home; test homes always use <userHome>/.codex. */
@@ -129,7 +150,7 @@ export interface InstalledWrappers {
 
 export function installWrappers(env: AdapterEnv): InstalledWrappers {
   const runtime = resolveNodeRuntime({ platform: env.platform, homeDir: env.userHome });
-  const written = writeWrappers(env.hooksDir, runtime, installedScriptPath(env));
+  const written = writeWrappers(env.hooksDir, runtime, installedScriptPath(env), env.explainitHome);
   const chosen = env.platform === 'win32' ? written.cmd : written.sh;
   return { wrapperPath: chosen.path, wrapperHash: chosen.hash, runtime };
 }
@@ -249,7 +270,7 @@ export interface AgentAdapterSpec {
   agent: AgentKind;
   label: string;
   configPath(env: AdapterEnv): string;
-  specs(quotedWrapper: string, watchdog: number): HookEntrySpec[];
+  specs(quotedWrapper: string, watchdog: number, pins: HookPins): HookEntrySpec[];
   nextSteps(env: AdapterEnv, changed: boolean): string[];
 }
 
@@ -274,7 +295,7 @@ export class HookAgentBase {
   }
 
   specsFor(wrapperPath: string): HookEntrySpec[] {
-    return this.spec.specs(quotedWrapper(this.env, wrapperPath), this.env.settings.get('gateWatchdogSeconds'));
+    return this.spec.specs(quotedWrapper(this.env, wrapperPath), this.env.settings.get('gateWatchdogSeconds'), hookPins(this.env));
   }
 
   async install(): Promise<InstallResult> {

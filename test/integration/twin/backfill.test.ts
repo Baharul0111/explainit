@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { BackfillStatus } from '../../../src/core/interfaces';
 import { canonicalPath, HOME_LAYOUT } from '../../../src/core/paths';
 import { isCodeFilePath } from '../../../src/twin/pure/languages';
-import { closeAllEditors, deleteTwins, getApi, setSetting, stubRouter, waitFor, workspaceRoot, type RouterStub } from './helpers';
+import { closeAllEditors, deleteTwins, getApi, pyFile, setSetting, stubRouter, tempFolder, waitFor, workspaceRoot, type RouterStub } from './helpers';
 import type { ExplainitApi } from '../../../src/extension';
 
 suite('twin backfill (integration)', function () {
@@ -111,5 +111,44 @@ suite('twin backfill (integration)', function () {
     await waitFor(() => !fs.existsSync(recordFile()), 5000, 'record removed');
     await api.twin.backfill.resume();
     assert.strictEqual(api.twin.backfill.status().state, 'idle', 'nothing to resume after cancel');
+  });
+
+  test('a 500-file workspace is scanned and backfilled within budget (REQ-021)', async function () {
+    this.timeout(600_000);
+    router.restore();
+    router = stubRouter(api);
+    await deleteTwins(workspaceRoot());
+    const t = tempFolder('load');
+    const FILES = 500;
+    const fileAt = (i: number): string => path.join(t.dir, `mod_${String(i).padStart(3, '0')}.py`);
+    try {
+      for (let i = 0; i < FILES; i++) fs.writeFileSync(fileAt(i), pyFile([`f${i}_a`, `f${i}_b`, `f${i}_c`]));
+      statuses.length = 0;
+      const startedAt = Date.now();
+      const started = api.twin.backfill.start();
+      await waitFor(() => statuses.some((s) => s.state === 'estimating'), 10_000, 'estimating state');
+      // The estimate ends when the run starts (the confirmation is auto-answered in test mode) or the scan gives up.
+      await waitFor(() => ['running', 'done', 'error', 'cancelled'].includes(api.twin.backfill.status().state), 60_000, 'estimate finished');
+      const estimateMs = Date.now() - startedAt;
+      const afterEstimate = api.twin.backfill.status();
+      assert.ok(['running', 'done'].includes(afterEstimate.state), `state after the estimate: ${afterEstimate.state} ${afterEstimate.error ?? ''}`);
+      assert.ok(estimateMs < 20_000, `scan + estimate of ${FILES} files took ${estimateMs}ms`);
+      assert.ok(afterEstimate.totalFiles >= FILES, `${afterEstimate.totalFiles} files planned`);
+      assert.ok(afterEstimate.estimate && afterEstimate.estimate.functions >= FILES * 3, `estimated ${afterEstimate.estimate?.functions} functions`);
+
+      await started;
+      await waitFor(() => api.twin.backfill.status().state === 'done', 300_000, `backfill of ${FILES} files done`);
+      const totalMs = Date.now() - startedAt;
+      const done = api.twin.backfill.status();
+      assert.strictEqual(done.doneFiles, done.totalFiles);
+      assert.ok(router.requests.length >= FILES, `${router.requests.length} requests`);
+      for (const req of router.requests) assert.ok(req.functions.length >= 1 && req.functions.length <= 20, `request with ${req.functions.length} functions`);
+      for (let i = 0; i < FILES; i++) assert.ok(fs.existsSync(path.join(t.dir, `mod_${String(i).padStart(3, '0')}_explain.txt`)), `missing twin for file ${i}`);
+      assert.ok(!fs.existsSync(recordFile()), 'record cleared when done');
+      console.log(`[load] ${FILES} files: estimate ${estimateMs}ms, whole run ${totalMs}ms, ${router.requests.length} requests`);
+    } finally {
+      t.rm();
+      await deleteTwins(workspaceRoot());
+    }
   });
 });

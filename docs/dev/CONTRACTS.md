@@ -293,3 +293,21 @@ watcher and twin staleness logic that a write was gate-approved.
   matching `hooks|explainit|trusted_hash|sha256:|enabled =` plus every line inside `[features]` and `[hooks*]` tables.
   Unparseable proposed JSON/TOML -> deny. Any partial edit of `hooks.json` is a hooks change even if only formatting changed.
 - Shell-command mentions of protected paths are checked case-insensitively on every platform.
+
+## Security hardening (post-review, 2026-09-02)
+
+- The hook command written into `~/.claude/settings.json` / `~/.codex/hooks.json` pins `--home <explainit home>` and the
+  absolute Claude/Codex config locations; the wrappers export `EXPLAINIT_HOME` before `exec`. The hook prefers those
+  arguments over environment variables, so `EXPLAINIT_HOME`/`HOME`/`CODEX_HOME` spoofing cannot redirect it to a rogue gate
+  or move the protected files. The command text is part of the integrity hash.
+- `.git/hooks/**` and `.git/config` are hard-denied (they run code as the user outside ExplainIT); other `.git/**` stays `ask`.
+- Shell analysis resolves `cd`/`pushd`-relocated redirects, `tee` and heredoc targets against the effective cwd; a protected
+  target is denied in every `checkpoint.shellWrites` mode.
+- Decision memory: a request without a `session_id` gets no memory; session/file acceptances expire after 30 minutes of
+  inactivity and are cleared when the checkpoint is paused or resumed.
+- `PostToolUse` is honoured only for writes the gate is expecting; anything else is journaled as a note and ignored.
+- At most 20 pending human reviews per session; beyond that the gate answers `ask`.
+- After an allowed twin-file write lands, ExplainIT re-renders that twin from its own cache/sidecar so an assistant cannot
+  plant misleading explanations.
+- `checkpoint.codexUnresponsive` (`deny` default | `passthrough`): Codex has no `ask`, so on watchdog expiry the hook denies
+  with a try-again reason unless the person chose passthrough. Claude Code keeps `ask`.

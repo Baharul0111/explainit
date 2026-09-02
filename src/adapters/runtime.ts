@@ -55,10 +55,14 @@ export interface WrittenWrappers {
   cmd: { path: string; hash: string };
 }
 
-/** Writes both wrappers (always both, so a synced home works on every OS) and returns their hashes. */
-export function writeWrappers(hooksDir: string, runtime: NodeRuntime, scriptPath: string): WrittenWrappers {
+/**
+ * Writes both wrappers (always both, so a synced home works on every OS) and returns their hashes.
+ * `explainitHome` is pinned into the wrappers as EXPLAINIT_HOME; it defaults to the parent of
+ * `hooksDir` because the hooks folder always lives directly under the ExplainIT home.
+ */
+export function writeWrappers(hooksDir: string, runtime: NodeRuntime, scriptPath: string, explainitHome: string = path.dirname(hooksDir)): WrittenWrappers {
   ensureDir(hooksDir);
-  const input = { runtime: runtime.path, script: scriptPath, electron: runtime.electron };
+  const input = { runtime: runtime.path, script: scriptPath, electron: runtime.electron, explainitHome: path.resolve(explainitHome) };
   const sh = path.join(hooksDir, WRAPPER_SH);
   const cmd = path.join(hooksDir, WRAPPER_CMD);
   const shText = wrapperShContent(input);

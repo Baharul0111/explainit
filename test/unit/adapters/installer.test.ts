@@ -97,6 +97,15 @@ suite('adapters/installer (claude + codex round trip)', function () {
     const ours = findOurEntries(settings);
     assert.strictEqual(ours.length, 2);
     assert.ok(ours[0].command.includes('--watchdog 90'));
+    // The command pins every location the hook relies on, so environment variables cannot move them.
+    for (const e of ours) {
+      assert.ok(e.command.includes(`--home "${sb.env.explainitHome}"`), e.command);
+      assert.ok(e.command.includes(`--claude-home "${path.join(sb.env.userHome, '.claude')}"`), e.command);
+      assert.ok(e.command.includes(`--codex-home "${path.join(sb.env.userHome, '.codex')}"`), e.command);
+    }
+    assert.ok(!ours[0].command.includes('--unresponsive'), 'Claude keeps its own ask fallback');
+    const wrapper = fs.readFileSync(path.join(sb.env.hooksDir, 'explainit-hook.sh'), 'utf8');
+    assert.ok(wrapper.includes(`EXPLAINIT_HOME="${sb.env.explainitHome}"`), 'the wrapper pins EXPLAINIT_HOME');
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.js')));
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.sh')));
     assert.ok(fs.existsSync(path.join(sb.env.hooksDir, 'explainit-hook.cmd')));
@@ -181,6 +190,28 @@ suite('adapters/installer (claude + codex round trip)', function () {
     assert.ok(findOurEntries(readJson(sb.claudeSettings))[0].command.includes('--watchdog 200'));
   });
 
+  test('changing checkpoint.codexUnresponsive shows as a fixable codex config mismatch and rearm rewrites it', async () => {
+    await sb.codex.install();
+    await sb.env.settings.set('gateCodexUnresponsive', 'passthrough');
+    const c = sb.codex.verify().find((x) => x.name.endsWith('hooks.json'));
+    assert.ok(c && !c.ok && c.fixable, JSON.stringify(c));
+    await sb.codex.rearm();
+    assert.ok(findOurEntries(readJson(sb.codexHooks)).find((e) => e.event === 'PreToolUse')!.command.includes('--unresponsive passthrough'));
+    assert.ok(sb.codex.verify().filter((x) => x.name !== 'Codex hook trust').every((x) => x.ok));
+  });
+
+  test('a tampered pin in the command (rogue --home) is a fixable mismatch and rearm restores the real one', async () => {
+    await sb.claude.install();
+    const settings = readJson(sb.claudeSettings);
+    const entry = settings.hooks.PreToolUse[0].hooks[0];
+    entry.command = entry.command.replace(`--home "${sb.env.explainitHome}"`, '--home "/rogue"');
+    fs.writeFileSync(sb.claudeSettings, JSON.stringify(settings, null, 2));
+    const c = sb.claude.verify().find((x) => x.name.endsWith('settings.json'));
+    assert.ok(c && !c.ok && c.fixable, JSON.stringify(c));
+    await sb.claude.rearm();
+    assert.ok(findOurEntries(readJson(sb.claudeSettings)).every((e) => e.command.includes(`--home "${sb.env.explainitHome}"`)));
+  });
+
   test('verify without an install reports "not connected" as ok, and orphan entries as fixable', async () => {
     assert.deepStrictEqual(sb.claude.verify().map((c) => c.ok), [true]);
     assert.match(sb.claude.verify()[0].detail ?? '', /Not connected/);
@@ -204,6 +235,8 @@ suite('adapters/installer (claude + codex round trip)', function () {
     assert.strictEqual(ours.length, 2);
     assert.strictEqual(ours.find((e) => e.event === 'PreToolUse')!.matcher, 'apply_patch|Edit|Write|Bash');
     assert.ok(ours[0].command.includes('--agent codex'));
+    assert.ok(ours.find((e) => e.event === 'PreToolUse')!.command.includes('--unresponsive deny'), 'the default setting is deny');
+    assert.ok(ours[0].command.includes(`--home "${sb.env.explainitHome}"`));
     // No config.toml yet -> untrusted, not fixable by us, with the trust instructions.
     let trust = sb.codex.verify().find((c) => c.name === 'Codex hook trust')!;
     assert.strictEqual(trust.ok, false);

@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import * as path from 'node:path';
-import { categorize, commandText, resolveTarget, targetPathOf, validateEnvelope } from '../../../src/gate/pure/ingress';
+import { categorize, commandForAnalysis, commandText, resolveTarget, targetPathOf, validateEnvelope } from '../../../src/gate/pure/ingress';
 
 const payload = (toolName: string, toolInput: unknown, extra: Record<string, unknown> = {}) => ({
   session_id: 's',
@@ -55,13 +55,18 @@ suite('gate/pure/ingress: validateEnvelope', () => {
     if (r.ok) assert.equal(r.category, 'irrelevant');
   });
 
-  test('missing session_id and cwd fall back to defaults', () => {
+  test('missing or blank session_id becomes "" (no shared fallback bucket); missing cwd falls back to the process cwd', () => {
     const r = validateEnvelope({ agent: 'claude', event: 'PostToolUse', payload: { tool_name: 'Write', tool_input: { file_path: 'a', content: '' } } });
     assert.equal(r.ok, true);
     if (r.ok) {
-      assert.equal(r.sessionId, 'unknown-session');
+      assert.equal(r.sessionId, '');
       assert.ok(path.isAbsolute(r.cwd));
     }
+    const blank = validateEnvelope({ agent: 'claude', event: 'PreToolUse', payload: payload('Write', { file_path: 'a', content: '' }, { session_id: '   ' }) });
+    assert.equal(blank.ok, true);
+    if (blank.ok) assert.equal(blank.sessionId, '');
+    const named = validateEnvelope({ agent: 'claude', event: 'PreToolUse', payload: payload('Write', { file_path: 'a', content: '' }, { session_id: 'unknown-session' }) });
+    if (named.ok) assert.equal(named.sessionId, 'unknown-session', 'a real id is kept verbatim, whatever it says');
   });
 });
 
@@ -92,6 +97,14 @@ suite('gate/pure/ingress: helpers', () => {
     assert.equal(commandText({ command: ['bash', '-lc', 'ls -la'] }), 'bash -lc ls -la');
     assert.equal(commandText({ command: 'ls' }), 'ls');
     assert.equal(commandText({}), '');
+  });
+  test('commandForAnalysis hands back the inner script of a `shell -c` argv, else the joined text', () => {
+    assert.equal(commandForAnalysis({ command: ['bash', '-lc', 'pushd ~/.codex; tee hooks.json'] }), 'pushd ~/.codex; tee hooks.json');
+    assert.equal(commandForAnalysis({ command: ['/bin/zsh', '-c', 'ls'] }), 'ls');
+    assert.equal(commandForAnalysis({ command: ['pwsh', '-Command', 'Get-ChildItem'] }), 'Get-ChildItem');
+    assert.equal(commandForAnalysis({ command: ['git', 'status', '-s'] }), 'git status -s');
+    assert.equal(commandForAnalysis({ command: 'bash -lc "ls"' }), 'bash -lc "ls"');
+    assert.equal(commandForAnalysis({}), '');
   });
   test('targetPathOf prefers file_path, then notebook_path, then path', () => {
     assert.equal(targetPathOf({ file_path: 'a', notebook_path: 'b' }), 'a');

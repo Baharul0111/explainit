@@ -10,16 +10,24 @@
  *   - No ExplainIT window is running for this file  -> prints nothing: the assistant uses its own
  *     normal permission prompt, exactly as if ExplainIT were not installed.
  *   - ExplainIT is running but stops answering       -> after the watchdog (default 120 s since
- *     the last answer; a "still thinking" heartbeat from ExplainIT resets it) prints "ask", so the
- *     assistant falls back to its own permission prompt. It never hangs and never lets a change
- *     through unchecked.
- *   - The change targets ExplainIT's own files or the hook settings -> "deny", even when no
- *     ExplainIT window is running, so an assistant cannot switch the checkpoint off.
+ *     the last answer; a "still thinking" heartbeat from ExplainIT resets it) Claude Code gets
+ *     "ask", so it falls back to its own permission prompt. Codex has no "ask", so it gets "deny"
+ *     with a try-again reason (--unresponsive deny, the default) or nothing (--unresponsive
+ *     passthrough, when the person chose that). It never hangs and never lets a change through
+ *     unchecked unless the person asked for that.
+ *   - The change targets ExplainIT's own files, the hook settings, .git/hooks or .git/config
+ *     -> "deny", even when no ExplainIT window is running, so an assistant cannot switch the
+ *     checkpoint off or plant code that git runs as the person.
  *   - Anything unexpected (bad input, crash)          -> prints nothing and exits 0.
+ *
+ * The installer bakes --home, --claude-home and --codex-home into the hook command (and the
+ * wrapper pins EXPLAINIT_HOME), so the locations this script protects and the folder it looks in
+ * for a running ExplainIT never depend on environment variables an assistant could change.
  *
  * Plain CommonJS, no dependencies, Node >= 16, same file on Windows, macOS and Linux.
  * Usage: explainit-hook.js --agent claude|codex [--event PreToolUse|PostToolUse]
  *                          [--watchdog <seconds>] [--home <explainit home>]
+ *                          [--claude-home <dir>] [--codex-home <dir>] [--unresponsive deny|passthrough]
  */
 'use strict';
 const fs = require('fs');
@@ -30,12 +38,13 @@ const http = require('http');
 const MAX_STDIN = 8 * 1024 * 1024;
 const HOOK_VERSION = '1';
 const ASK_REASON = 'ExplainIT is not responding; falling back to your normal permission prompt.';
+const UNRESPONSIVE_DENY_REASON = 'ExplainIT is not responding; try again in a moment (nothing lands unchecked).';
 const CLAUDE_TOOLS = /^(Write|Edit|MultiEdit|NotebookEdit|Bash)$/;
 const CODEX_TOOLS = /^(apply_patch|Edit|Write|Bash|shell.*)$/;
 const CASE_INSENSITIVE = process.platform === 'win32' || process.platform === 'darwin';
 
 function parseArgs(argv) {
-  const o = { agent: 'claude', event: 'PreToolUse', watchdog: 120, home: '' };
+  const o = { agent: 'claude', event: 'PreToolUse', watchdog: 120, home: '', claudeHome: '', codexHome: '', unresponsive: 'deny' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = argv[i + 1];
@@ -43,9 +52,18 @@ function parseArgs(argv) {
     else if (a === '--event' && v) { o.event = v; i++; }
     else if (a === '--watchdog' && v) { o.watchdog = Math.max(1, parseInt(v, 10) || 120); i++; }
     else if (a === '--home' && v) { o.home = v; i++; }
+    else if (a === '--claude-home' && v) { o.claudeHome = v; i++; }
+    else if (a === '--codex-home' && v) { o.codexHome = v; i++; }
+    else if (a === '--unresponsive' && v) { o.unresponsive = v === 'passthrough' ? 'passthrough' : 'deny'; i++; }
   }
-  if (!o.home) o.home = (process.env.EXPLAINIT_HOME || '').trim() || path.join(os.homedir(), '.explainit');
+  // Pinned arguments win; the environment is only a fallback for a hand-run script.
+  const userHome = os.homedir();
+  if (!o.home) o.home = (process.env.EXPLAINIT_HOME || '').trim() || path.join(userHome, '.explainit');
+  if (!o.claudeHome) o.claudeHome = path.join(userHome, '.claude');
+  if (!o.codexHome) o.codexHome = (process.env.CODEX_HOME || '').trim() || path.join(userHome, '.codex');
   o.home = path.resolve(o.home);
+  o.claudeHome = path.resolve(o.claudeHome);
+  o.codexHome = path.resolve(o.codexHome);
   return o;
 }
 
@@ -74,8 +92,17 @@ function decisionOut(agent, decision) {
   if (pd === 'allow' && agent === 'codex' && out.updatedInput === undefined) return null;
   return { hookSpecificOutput: out };
 }
-const askOut = function (agent) { return decisionOut(agent, { permissionDecision: 'ask', reason: ASK_REASON }); };
 const denyOut = function (reason) { return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }; };
+/** What to print when ExplainIT did not answer in time (watchdog) or could not be reached at all. */
+function unresponsiveOut(opts) {
+  if (opts.agent === 'codex') {
+    // Codex cannot show its own prompt on request, so the only safe answer is a deny the assistant can retry.
+    if (opts.unresponsive === 'deny') return denyOut(UNRESPONSIVE_DENY_REASON);
+    process.stderr.write(ASK_REASON + '\n');
+    return null;
+  }
+  return decisionOut(opts.agent, { permissionDecision: 'ask', reason: ASK_REASON });
+}
 
 function readStdin(cb) {
   const chunks = [];
@@ -124,7 +151,11 @@ function targetPath(agent, tool, input, cwd) {
 function isShell(tool) { return tool === 'Bash' || /^shell/.test(tool); }
 function shellText(input) {
   const c = input.command !== undefined ? input.command : input.cmd;
-  return Array.isArray(c) ? c.map(String).join(' ') : str(c);
+  if (!Array.isArray(c)) return str(c);
+  // Codex's shell tool sends argv: `["bash", "-lc", "<script>"]`. Analyse the script itself, not a re-joined
+  // approximation of it; other argv shapes are re-quoted so tokens with spaces stay whole.
+  if (c.length >= 3 && /^-(l?c|Command)$/i.test(String(c[1])) && /^(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)(\.exe)?$/i.test(baseCommand(String(c[0])))) return String(c[2]);
+  return c.map(function (t) { t = String(t); return /\s/.test(t) ? '"' + t.replace(/"/g, '\\"') + '"' : t; }).join(' ');
 }
 
 // ---- protected paths (mirror of the gate policy; applies even without a running window) ----------
@@ -169,35 +200,209 @@ function tomlHooksChange(tool, input, file) {
   const lines = function (t) { return t.split(/\r?\n/).filter(function (l) { return TOML_TRUST_WORDS.test(l); }).join('\n'); };
   return lines(next) !== lines(currentText(file));
 }
-function protectedReason(opts, tool, input, target) {
+// ---- shell analysis (mirror of src/gate/pure/shell.ts, plus cwd tracking) -------------------------
+// We do not parse shell for real. Commands are split into simple segments (`;`, `&&`, `||`, `|`,
+// newlines), each segment is tokenised with basic quote handling, `cd`/`pushd` move an "effective
+// cwd" forward, and every file a segment writes (redirects, tee, heredocs, cp/mv, rm, sed -i, ...)
+// is resolved against that cwd before it is checked against the protected list. So
+// `cd ~/.claude && cat > settings.json` is caught even though no token names the protected file.
+const SEGMENT_SPLIT = /\s*(?:&&|\|\||;|\||\n)\s*/;
+const PATCH_FILE_LINE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;
+function tokenize(segment) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  let has = false;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === '\\' && quote === '"' && i + 1 < segment.length) cur += segment[++i];
+      else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; has = true; continue; }
+    if (ch === '\\' && i + 1 < segment.length) { cur += segment[++i]; has = true; continue; }
+    if (/\s/.test(ch)) { if (cur || has) out.push(cur); cur = ''; has = false; continue; }
+    cur += ch;
+    has = true;
+  }
+  if (cur || has) out.push(cur);
+  return out;
+}
+function isRedirectOp(tok) { return /^(\d?>>?|&>|>\|)$/.test(tok); }
+function baseCommand(tok) { return tok.replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, ''); }
+function stripEnvAssignments(tokens) {
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+  return tokens.slice(i);
+}
+/** Expands the home spellings a shell would (`~`, `$HOME`, `%USERPROFILE%`, `$CODEX_HOME`, `$EXPLAINIT_HOME`). */
+function expandHome(tok, opts) {
   const userHome = os.homedir();
-  const claudeSettings = [path.join(userHome, '.claude', 'settings.json'), path.join(userHome, '.claude', 'settings.local.json')];
-  // Codex keeps its files under CODEX_HOME when that is set (the installer follows it too).
-  const codexHome = (process.env.CODEX_HOME || '').trim() || path.join(userHome, '.codex');
-  const codexFiles = [path.join(codexHome, 'hooks.json'), path.join(codexHome, 'config.toml')];
-  const refuse = function (what) {
-    return 'ExplainIT refused this change: ' + what + ' If the person really wants this, they can change it by hand outside the assistant.';
-  };
+  let t = tok;
+  if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) t = userHome + t.slice(1);
+  t = t.replace(/\$\{?EXPLAINIT_HOME\}?/g, opts.home).replace(/%EXPLAINIT_HOME%/gi, opts.home);
+  t = t.replace(/\$\{?CODEX_HOME\}?/g, opts.codexHome).replace(/%CODEX_HOME%/gi, opts.codexHome);
+  t = t.replace(/\$\{?HOME\}?/g, userHome).replace(/%USERPROFILE%/gi, userHome).replace(/%HOME%/gi, userHome);
+  return t;
+}
+function resolveAgainst(cwd, tok, opts) {
+  const t = expandHome(tok, opts);
+  return path.isAbsolute(t) ? path.normalize(t) : path.resolve(cwd, t);
+}
+/** Segments of a path split on either separator. */
+function segmentsOf(p) { return p.split(/[\\/]+/).filter(function (x) { return x !== ''; }); }
+function underGitHooks(segs) {
+  for (let i = 0; i + 1 < segs.length; i++) if (segs[i] === '.git' && segs[i + 1] === 'hooks') return true;
+  return false;
+}
+function isGitConfig(segs) { const n = segs.length; return n >= 2 && segs[n - 1] === 'config' && segs[n - 2] === '.git'; }
+function isGitExclude(segs) { const n = segs.length; return n >= 3 && segs[n - 1] === 'exclude' && segs[n - 2] === 'info' && segs[n - 3] === '.git'; }
+function refuse(what) {
+  return 'ExplainIT refused this change: ' + what + ' If the person really wants this, they can change it by hand outside the assistant.';
+}
+/** Why a shell command may not write `abs` (a resolved absolute path), or null. Shell writes cannot be replayed, so any hook config file is refused. */
+function protectedShellTarget(abs, opts) {
+  if (inside(opts.home, abs)) return refuse('ExplainIT keeps its own files under ' + opts.home + ' and assistants may not change them.');
+  const segs = segmentsOf(abs);
+  const n = segs.length;
+  const base = segs[n - 1] || '';
+  const parent = segs[n - 2] || '';
+  if (isGitExclude(segs)) return refuse('.git/info/exclude keeps the plain-English twin files out of git.');
+  if (underGitHooks(segs)) return refuse('.git/hooks holds scripts that git runs as the person, outside the ExplainIT checkpoint.');
+  if (isGitConfig(segs)) return refuse('.git/config decides where git looks for hooks and what it runs.');
+  const claudeFiles = [path.join(opts.claudeHome, 'settings.json'), path.join(opts.claudeHome, 'settings.local.json')];
+  const codexFiles = [path.join(opts.codexHome, 'hooks.json'), path.join(opts.codexHome, 'config.toml')];
+  if (claudeFiles.concat(codexFiles).some(function (f) { return sameFile(f, abs); })) return refuse(base + ' holds the hooks that run the ExplainIT checkpoint; a shell command cannot be reviewed, so use the person\'s own editor for it.');
+  if (parent === '.claude' && (base === 'settings.json' || base === 'settings.local.json')) return refuse(base + ' may hold hooks that run the ExplainIT checkpoint; a shell command cannot be reviewed, so use the Edit tool for it.');
+  if (parent === '.codex' && (base === 'hooks.json' || base === 'config.toml')) return refuse('.codex/' + base + ' may hold hooks that run the ExplainIT checkpoint; a shell command cannot be reviewed, so use the Edit tool for it.');
+  return null;
+}
+/** Why a shell command may not move into `abs`, or null. */
+function protectedShellDir(abs, opts) {
+  if (inside(opts.home, abs)) return refuse('the command moves into ' + opts.home + ', where ExplainIT keeps the files assistants may not change.');
+  if (inside(opts.claudeHome, abs)) return refuse('the command moves into ' + opts.claudeHome + ', which holds the hooks that run the ExplainIT checkpoint.');
+  if (inside(opts.codexHome, abs)) return refuse('the command moves into ' + opts.codexHome + ', which holds the hooks Codex trusts, including the ExplainIT checkpoint.');
+  if (underGitHooks(segmentsOf(abs))) return refuse('the command moves into .git/hooks, whose scripts git runs as the person outside the ExplainIT checkpoint.');
+  return null;
+}
+const GIT_CONFIG_READ = /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope|--get-urlmatch|--name-only|list|get)$/;
+const GIT_CONFIG_WRITE = /^(--unset|--unset-all|--add|--replace-all|--edit|-e|--rename-section|--remove-section|set|unset|edit|rename-section|remove-section)$/;
+/** Files and directories a segment writes / enters. Returns { cwd, reason } with the cwd after the segment. */
+function analyseSegment(segment, cwd, opts, depth) {
+  const raw = tokenize(segment);
+  if (raw.length === 0) return { cwd: cwd, reason: null };
+  const targets = [];
+  for (let i = 0; i < raw.length; i++) {
+    const t = raw[i];
+    if (isRedirectOp(t) && i + 1 < raw.length) { targets.push(raw[i + 1]); continue; }
+    const m = /^(\d?>>?)(.+)$/.exec(t);
+    if (m && !m[2].startsWith('&')) targets.push(m[2]);
+  }
+  let tokens = stripEnvAssignments(raw);
+  while (tokens.length && ['sudo', 'env', 'command', 'exec', 'nohup', 'time', 'builtin'].indexOf(baseCommand(tokens[0])) >= 0) tokens = stripEnvAssignments(tokens.slice(1));
+  let next = cwd;
+  if (tokens.length) {
+    const cmd = baseCommand(tokens[0]);
+    const args = tokens.slice(1);
+    const plain = args.filter(function (a) { return !a.startsWith('-') && !isRedirectOp(a); });
+    const hasFlag = function (re) { return args.some(function (a) { return re.test(a); }); };
+    switch (cmd) {
+      case 'cd': case 'pushd': case 'chdir': {
+        const dir = plain.length ? plain[plain.length - 1] : '~';
+        next = resolveAgainst(cwd, dir, opts);
+        const r = protectedShellDir(next, opts);
+        if (r) return { cwd: next, reason: r };
+        break;
+      }
+      case 'tee': targets.push.apply(targets, plain); break;
+      case 'cp': case 'mv': case 'install': case 'ln': case 'rename': case 'copy': case 'move': case 'xcopy': case 'robocopy':
+        if (plain.length) targets.push(plain[plain.length - 1]);
+        break;
+      case 'rm': case 'unlink': case 'del': case 'erase': case 'truncate': case 'shred': case 'chmod': case 'chown': case 'chattr': case 'touch': case 'attrib': case 'icacls':
+        targets.push.apply(targets, plain);
+        break;
+      case 'sed': case 'gsed': case 'perl': case 'awk': case 'gawk':
+        if (hasFlag(/^(-[a-zA-Z]*i|--in-place)/)) targets.push.apply(targets, plain);
+        break;
+      case 'git': {
+        // Skip global options (`-C dir`, `-c k=v`, `--git-dir=...`) to find the subcommand.
+        let j = 0;
+        while (j < args.length && args[j].startsWith('-')) { if (args[j] === '-C' || args[j] === '-c') j++; j++; }
+        const sub = args[j];
+        if (sub === 'config') {
+          const rest = args.slice(j + 1);
+          const readOnly = rest.some(function (a) { return GIT_CONFIG_READ.test(a); }) && !rest.some(function (a) { return GIT_CONFIG_WRITE.test(a); });
+          if (!readOnly) return { cwd: next, reason: refuse('"git config" changes .git/config (or the global git config), which decides where git looks for hooks and what it runs.') };
+        }
+        break;
+      }
+      case 'sh': case 'bash': case 'zsh': case 'dash': case 'ksh': case 'cmd': case 'powershell': case 'pwsh': {
+        const idx = args.findIndex(function (a) { return /^-(l?c|Command|c)$/i.test(a); });
+        if (idx >= 0 && args[idx + 1] && depth < 4) {
+          const inner = analyseShell(args[idx + 1], cwd, opts, depth + 1);
+          if (inner) return { cwd: next, reason: inner };
+        }
+        break;
+      }
+      default: break;
+    }
+  }
+  for (const t of targets) {
+    if (!t || t.startsWith('&') || t === '/dev/null' || t.toUpperCase() === 'NUL') continue;
+    const r = protectedShellTarget(resolveAgainst(cwd, t, opts), opts);
+    if (r) return { cwd: next, reason: r };
+  }
+  return { cwd: next, reason: null };
+}
+/** Reason a whole command line is refused, or null. `cwd` is where the assistant runs it. */
+function analyseShell(command, cwd, opts, depth) {
+  let cur = cwd;
+  const segments = command.split(SEGMENT_SPLIT);
+  for (const seg of segments) {
+    if (!seg.trim()) continue;
+    const r = analyseSegment(seg, cur, opts, depth || 0);
+    if (r.reason) return r.reason;
+    cur = r.cwd;
+  }
+  // A heredoc-fed apply_patch names its files on `*** Update File:` lines.
+  let m;
+  PATCH_FILE_LINE.lastIndex = 0;
+  while ((m = PATCH_FILE_LINE.exec(command)) !== null) {
+    const r = protectedShellTarget(resolveAgainst(cwd, m[1].trim(), opts), opts);
+    if (r) return r;
+  }
+  return null;
+}
+
+function protectedReason(opts, tool, input, target, cwd) {
+  // The installer pins these locations into the hook command; env-based fallbacks only apply to a hand-run script.
+  const claudeSettings = [path.join(opts.claudeHome, 'settings.json'), path.join(opts.claudeHome, 'settings.local.json')];
+  const codexFiles = [path.join(opts.codexHome, 'hooks.json'), path.join(opts.codexHome, 'config.toml')];
   if (isShell(tool)) {
     const cmd = shellText(input);
     if (!cmd) return null;
     // Case-insensitive on every OS (stricter is fine here: a false deny only costs the person a retry by hand).
     const cmdNorm = cmd.replace(/\\/g, '/').toLowerCase();
     // opts.home is absolute; '/.explainit' also catches ~/.explainit and $HOME/.explainit spellings of the default home.
-    const needles = [opts.home, '/.explainit', '.claude/settings', '.codex/hooks.json', '.codex/config.toml', '.git/info/exclude', 'explainit-hook'];
+    const needles = [opts.home, '/.explainit', '.claude/settings', '.codex/hooks.json', '.codex/config.toml', '.git/info/exclude', '.git/hooks', '.git/config', 'core.hookspath', 'explainit-hook'];
     for (const n of needles) if (cmdNorm.includes(n.replace(/\\/g, '/').toLowerCase())) return refuse('the command references files that keep the ExplainIT checkpoint working (' + n + ').');
-    return null;
+    // Structural check: where the command really writes, after any cd/pushd, redirect, tee or copy.
+    return analyseShell(cmd, cwd || process.cwd(), opts, 0);
   }
   if (!target) return null;
   if (inside(opts.home, target)) return refuse('ExplainIT keeps its own files under ' + opts.home + ' and assistants may not change them.');
   const segs = target.split(/[\\/]+/);
   const n = segs.length;
-  if (n >= 3 && segs[n - 1] === 'exclude' && segs[n - 2] === 'info' && segs[n - 3] === '.git') return refuse('.git/info/exclude keeps the plain-English twin files out of git.');
+  if (isGitExclude(segs)) return refuse('.git/info/exclude keeps the plain-English twin files out of git.');
+  if (underGitHooks(segs)) return refuse('.git/hooks holds scripts that git runs as the person, outside the ExplainIT checkpoint.');
+  if (isGitConfig(segs)) return refuse('.git/config decides where git looks for hooks and what it runs.');
   const base = segs[n - 1];
   const parent = segs[n - 2] || '';
   // User-layer files are protected outright for whole-file writes; project-layer copies and edits only when hooks change.
   const userLayer = claudeSettings.concat(codexFiles).some(function (f) { return sameFile(f, target); });
-  const isClaudeSettings = parent === '.claude' && (base === 'settings.json' || base === 'settings.local.json');
+  const isClaudeSettings = (parent === '.claude' || claudeSettings.some(function (f) { return sameFile(f, target); })) && (base === 'settings.json' || base === 'settings.local.json');
   const isCodexHooks = base === 'hooks.json' && (parent === '.codex' || sameFile(codexFiles[0], target));
   const isCodexConfig = base === 'config.toml' && (parent === '.codex' || sameFile(codexFiles[1], target));
   if (isClaudeSettings && ((userLayer && tool === 'Write') || jsonHooksChange(tool, input, target))) return refuse(base + ' holds the hooks that run the ExplainIT checkpoint.');
@@ -271,7 +476,7 @@ function gateFlow(opts, session, envelope) {
     request(session, 'GET', '/v1/decision/' + encodeURIComponent(id), null, remaining(), function (err, status, json) {
       if (err) {
         if (err.message !== 'timeout' && !retried && Date.now() < deadline) return setTimeout(function () { poll(id, true); }, jitter());
-        return finish(askOut(opts.agent));
+        return finish(unresponsiveOut(opts));
       }
       deadline = Date.now() + watchdogMs; // any answer (including a pending heartbeat) resets the watchdog
       if (status === 200 && json && json.status === 'done') return finish(decisionOut(opts.agent, json.decision));
@@ -279,7 +484,7 @@ function gateFlow(opts, session, envelope) {
         const wait = Date.now() - started < 1000 ? 1000 : 0; // never spin if the gate answers instantly
         return setTimeout(function () { poll(id, false); }, wait);
       }
-      return finish(askOut(opts.agent));
+      return finish(unresponsiveOut(opts));
     });
   };
 
@@ -287,12 +492,12 @@ function gateFlow(opts, session, envelope) {
     request(session, 'POST', '/v1/hook', envelope, remaining(), function (err, status, json) {
       if (err) {
         if (err.message !== 'timeout' && !retried && Date.now() < deadline) return setTimeout(function () { post(true); }, jitter());
-        return finish(askOut(opts.agent));
+        return finish(unresponsiveOut(opts));
       }
       deadline = Date.now() + watchdogMs;
       if (status === 200 && json && json.decision) return finish(decisionOut(opts.agent, json.decision));
       if (status === 202 && json && json.requestId) return poll(String(json.requestId), false);
-      return finish(askOut(opts.agent));
+      return finish(unresponsiveOut(opts));
     });
   };
   post(false);
@@ -310,7 +515,7 @@ function run(opts, text) {
   const target = targetPath(opts.agent, tool, input, cwd);
   const pre = opts.event !== 'PostToolUse';
   if (pre) {
-    const reason = protectedReason(opts, tool, input, target);
+    const reason = protectedReason(opts, tool, input, target, cwd);
     if (reason) return finish(denyOut(reason));
   }
   const session = findSession(opts.home, target || cwd);

@@ -184,6 +184,8 @@ export interface HookOutcome {
   reason?: string;
   /** What went wrong when `answered` is false. */
   problem?: string;
+  /** How the hook was run, in plain English (e.g. "through the installed wrapper <path>"). */
+  via?: string;
 }
 
 /** Interpret the hook script's stdout. Empty output means "no opinion" (no gate found, or paused). */

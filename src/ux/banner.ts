@@ -51,8 +51,8 @@ export class PausedBanner {
     this.deps.logger.info('showing paused banner');
     const testMode = this.deps.testMode ?? isTestMode();
     if (testMode) {
-      // No dialogs in test mode; the banner state is still tracked so tests can assert it.
-      this.visible = false;
+      // No dialogs in test mode; the banner counts as showing until the checkpoint is resumed so tests
+      // can assert `isVisible` after pause (true) and after resume (false).
       return;
     }
     void vscode.window.showWarningMessage(MESSAGES.pausedBanner, RESUME_LABEL).then(

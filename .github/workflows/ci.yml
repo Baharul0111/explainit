@@ -70,24 +70,41 @@ jobs:
       - name: Build (esbuild bundle + tree-sitter grammars)
         run: npm run build
 
+      # The integration output is kept in a file so the performance budgets can be checked from it
+      # after the run (pipefail keeps a failing test failing the step even though it goes through tee).
       - name: Integration tests inside VS Code (Linux, under xvfb)
         if: runner.os == 'Linux'
+        shell: bash
         env:
           EXPLAINIT_HOME: ${{ runner.temp }}/explainit-home
-        run: xvfb-run -a npm run test:integration
+        run: |
+          set -euo pipefail
+          xvfb-run -a npm run test:integration 2>&1 | tee "$RUNNER_TEMP/integration.log"
 
       - name: Integration tests inside VS Code
         if: runner.os != 'Linux'
+        shell: bash
         env:
           EXPLAINIT_HOME: ${{ runner.temp }}/explainit-home
-        run: npm run test:integration
+        run: |
+          set -euo pipefail
+          npm run test:integration 2>&1 | tee "$RUNNER_TEMP/integration.log"
 
-      - name: Upload ExplainIT logs when the integration tests fail
+      # Budgets (architecture.md): cached twin < 300 ms, provisional twin < 1 s, gate panel < 500 ms.
+      # The tests assert them inside VS Code; this step enforces any "[perf] name: n ms" lines they
+      # print and is a documented no-op (exit 0, one clear line) when the output carries none.
+      - name: Performance budgets from the integration output (cached twin < 300 ms, provisional twin < 1 s, gate panel < 500 ms)
+        shell: bash
+        run: node scripts/perf-report.js "$RUNNER_TEMP/integration.log" --enforce
+
+      - name: Upload ExplainIT logs and the integration output when the integration tests fail
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: explainit-logs-${{ matrix.os }}
-          path: ${{ runner.temp }}/explainit-home/logs
+          path: |
+            ${{ runner.temp }}/explainit-home/logs
+            ${{ runner.temp }}/integration.log
           if-no-files-found: ignore
 
       - name: Package the VSIX (vsce --no-dependencies)

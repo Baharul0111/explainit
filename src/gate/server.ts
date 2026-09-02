@@ -23,6 +23,13 @@ export const LONG_POLL_MS = 25_000;
 export const FAST_PATH_MS = 1_500;
 /** Finished decisions are kept this long for late polls. */
 const DONE_TTL_MS = 10 * 60_000;
+/**
+ * Hook calls still being decided at the same time, across every session (security review F7).
+ * Beyond this the server answers `ask` at once (the agent's own prompt) without touching the
+ * controller, so a flood of hook calls cannot queue unbounded work. The controller applies a
+ * tighter per-session cap on reviews that need a human.
+ */
+export const MAX_IN_FLIGHT = 64;
 
 interface Pending {
   promise: Promise<HookDecision>;
@@ -44,6 +51,8 @@ export interface ServerDeps {
   /** Test seams: shorten the long-poll and fast-path windows. */
   longPollMs?: number;
   fastPathMs?: number;
+  /** Test seam: lower the in-flight cap (default MAX_IN_FLIGHT). */
+  maxInFlight?: number;
 }
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
@@ -263,6 +272,18 @@ export class GateHttpServer {
       parsed = JSON.parse(body.text);
     } catch {
       send(res, 400, { error: 'The request body is not valid JSON.' });
+      return;
+    }
+    const cap = this.deps.maxInFlight ?? MAX_IN_FLIGHT;
+    const busy = this.inFlight;
+    if (busy >= cap) {
+      this.log.warn(`${busy} hook call(s) already in flight; answering ask`);
+      send(res, 200, {
+        decision: {
+          permissionDecision: 'ask',
+          reason: `ExplainIT already has ${busy} changes waiting for a decision. Decide on those first; this change goes to your normal permission prompt.`,
+        } satisfies HookDecision,
+      });
       return;
     }
     const requestId = randomId('req-');

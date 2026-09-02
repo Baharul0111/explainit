@@ -14,6 +14,7 @@ import type { Logger } from '../core/log';
 import { applyAllFixes, runDoctorChecks, type DoctorDeps, type InstructionFileProbe } from './pure/doctorChecks';
 import { probeHealthWithRetry } from './pure/health';
 import { MESSAGES, msg, describeError } from './pure/messages';
+import { planHookLaunch } from './pure/hookLaunch';
 import { HOOK_OUTPUT_CAP, codexPathsFor, interpretHookOutput, parseSessionFile, syntheticWritePayload, type HookOutcome } from './pure/parsers';
 import { renderDoctorMarkdown } from './pure/render';
 import type { Prompter } from './prompts';
@@ -35,8 +36,10 @@ const FIX_ALL = 'Fix all';
 const OPEN_REPORT = 'Open report';
 
 /**
- * Spawn the hook script with a synthetic twin-file Write for `folder`; the gate answers twin writes by itself,
- * so no human is needed. The script always runs as `--agent claude` with a Claude-shaped payload: Claude hook
+ * Run the hook with a synthetic twin-file Write for `folder`; the gate answers twin writes by itself, so no
+ * human is needed. The hook is exercised the way the assistants run it: through the installed wrapper
+ * (pinned runtime, pinned home) when one exists, else the script directly with this process's Node
+ * (see pure/hookLaunch.ts). It always runs as `--agent claude` with a Claude-shaped payload: Claude hook
  * semantics print every answer, whereas under `--agent codex` a bare allow prints nothing (see parsers.ts).
  */
 export async function hookLiveTest(ux: UxDeps, folder: string, logger: Logger, timeoutMs = 7000): Promise<HookOutcome> {
@@ -47,31 +50,44 @@ export async function hookLiveTest(ux: UxDeps, folder: string, logger: Logger, t
     script = '';
   }
   if (!script || !fs.existsSync(script)) script = path.join(ux.extensionPath, 'hooks', 'explainit-hook.js');
-  if (!fs.existsSync(script)) return { answered: false, problem: `the hook script is missing (${script}); reinstall the hooks` };
+
+  const watchdog = Math.max(3, Math.floor(timeoutMs / 1000) - 1);
+  const adapters = ux.state.read().adapters ?? {};
+  const plan = planHookLaunch({
+    wrapperCandidates: [adapters.claude?.wrapperPath, adapters.codex?.wrapperPath],
+    scriptPath: script,
+    platform: process.platform,
+    execPath: process.execPath,
+    exists: (p) => fs.existsSync(p),
+    watchdogSeconds: watchdog,
+    home: explainitHome(),
+    agent: 'claude',
+  });
+  if ('error' in plan) return { answered: false, problem: plan.error };
+  const via = plan.description;
 
   const target = path.join(folder, 'explainit-doctor-probe_explain.txt');
   const payload = syntheticWritePayload(folder, target, 'explainit-doctor-probe.py');
-  const watchdog = Math.max(3, Math.floor(timeoutMs / 1000) - 1);
   return new Promise<HookOutcome>((resolve) => {
     let settled = false;
     const done = (o: HookOutcome) => {
       if (settled) return;
       settled = true;
-      resolve(o);
+      resolve({ ...o, via });
     };
     let child: ReturnType<typeof spawn>;
     try {
-      // Argument array only; no shell. process.execPath is VS Code's Electron in the extension host,
-      // ELECTRON_RUN_AS_NODE makes it behave as plain Node (harmless under real Node). `--agent claude` on
-      // purpose: the payload is Claude-shaped and Claude semantics print allow/deny/ask alike.
-      child = spawn(process.execPath, [script, '--agent', 'claude', '--watchdog', String(watchdog)], {
+      // Argument array only; never a shell string built from anything an agent wrote. EXPLAINIT_HOME is
+      // set for older hook builds; the `--home` argument is what the current hook prefers.
+      child = spawn(plan.command, plan.args, {
         cwd: folder,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', EXPLAINIT_HOME: explainitHome() },
+        env: { ...process.env, EXPLAINIT_HOME: explainitHome(), ...plan.env },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       });
     } catch (e) {
-      return done({ answered: false, problem: `could not start the hook script: ${describeError(e)}` });
+      return done({ answered: false, problem: `could not start the hook ${via}: ${describeError(e)}` });
     }
     let out = '';
     let err = '';

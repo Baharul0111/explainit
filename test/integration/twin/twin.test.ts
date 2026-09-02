@@ -8,6 +8,8 @@ import { canonicalPath } from '../../../src/core/paths';
 import { NO_FUNCTIONS_LINE, PENDING_LINE, STALE_LINE, UNAVAILABLE_LINE } from '../../../src/twin/pure/render';
 import { parseTwin, sectionAtLine } from '../../../src/twin/pure/parse';
 import { functionAtLine } from '../../../src/twin/pure/stale';
+import { languageIdForPath } from '../../../src/twin/pure/languages';
+import type { TwinEngineImpl } from '../../../src/twin/engine';
 import { closeAllEditors, deleteTwins, docLike, getApi, pyFile, readText, setEditorSetting, setSetting, sleep, stubRouter, tempFolder, visibleEditorFor, waitFor, workspaceRoot, type RouterStub } from './helpers';
 import type { ExplainitApi } from '../../../src/extension';
 import type { FunctionMap } from '../../../src/core/types';
@@ -311,6 +313,60 @@ suite('twin engine (integration)', function () {
     assert.deepStrictEqual(parsed.sections.map((s) => [s.name, s.state, s.stale]), [['keep', 'explained', false], ['change', 'explained', true], ['added', 'unavailable', false]]);
     assert.deepStrictEqual(parsed.sections[0].content, good.sections[0].content);
     assert.deepStrictEqual(parsed.sections[1].content, good.sections[1].content, 'old explanation kept, marked stale');
+  });
+
+  test('AI segmentation last resort: a language nothing can outline is outlined by the assistant when explaining, never when marking stale', async () => {
+    router.restore();
+    router = stubRouter(api, { segments: [{ name: 'foo', startLine: 0, endLine: 3 }] });
+    const t = tempFolder('ai');
+    temps.push(t);
+    // Fortran: no symbol provider in the test host, no tree-sitter grammar, no heuristic keyword.
+    const file = path.join(t.dir, 'sample.f90');
+    const source = 'subroutine foo(x)\n  integer :: x\n  x = x + 1\nend subroutine foo\n';
+    fs.writeFileSync(file, source);
+    assert.strictEqual(languageIdForPath(file), 'fortran');
+    assert.ok(!api.structure.treeSitterLanguages().includes('fortran'));
+    // Described from disk (like a saved file that is not open): the test host has no Fortran language id.
+    const doc = { uri: vscode.Uri.file(file).toString(), fsPath: file, languageId: 'fortran', getText: () => fs.readFileSync(file, 'utf8') };
+
+    const twin = await api.twin.ensureTwin(doc, { open: false });
+    assert.ok(twin, 'ensureTwin returned nothing');
+    assert.strictEqual(router.segment.callCount, 1, 'the assistant was asked to outline the file exactly once');
+    const segReq = router.segment.firstCall.args[0] as { fileName: string; languageId: string; text: string };
+    assert.strictEqual(segReq.fileName, 'sample.f90');
+    assert.strictEqual(segReq.languageId, 'fortran');
+    assert.strictEqual(segReq.text, source);
+    const state = await (api.twin as unknown as TwinEngineImpl).stateFor(file);
+    assert.strictEqual(state?.map?.source, 'ai', `function map source: ${state?.map?.source}`);
+    assert.deepStrictEqual(state!.map!.functions.map((f) => [f.name, f.range.startLine, f.range.endLine]), [['foo', 0, 3]]);
+    assert.strictEqual(router.explain.callCount, 1);
+    assert.deepStrictEqual(router.requests[0].functions.map((f) => f.name), ['foo']);
+    assert.strictEqual(router.requests[0].functions[0].text, source.trimEnd(), 'the AI-outlined range is what gets explained');
+    const twinPath = path.join(t.dir, 'sample_explain.txt');
+    const text = readText(twinPath);
+    assert.ok(text.includes('\n1. foo\n'), text);
+    assert.ok(text.includes('What it does: foo does one simple thing.'), text);
+    assert.strictEqual(twin!.sections.length, 1);
+    assert.strictEqual(sidecarFor(file).sections[0].name, 'foo');
+
+    // Marking stale must never spend credits: no AI outline, no explanation call. With no outline at all
+    // the section is kept and marked out of date rather than replaced by "no functions".
+    fs.writeFileSync(file, source.replace('x + 1', 'x + 2'));
+    await api.twin.markStale(file);
+    assert.strictEqual(router.segment.callCount, 1, 'markStale must not ask the assistant to outline');
+    assert.strictEqual(router.explain.callCount, 1, 'markStale must not ask the assistant to explain');
+    const after = readText(twinPath);
+    assert.ok(after.includes('\n1. foo\n'), `section kept after markStale:\n${after}`);
+    assert.ok(after.includes(STALE_LINE), 'section marked out of date');
+    assert.ok(!after.includes(NO_FUNCTIONS_LINE));
+    assert.deepStrictEqual(parseTwin(after).sections.map((s) => [s.name, s.state, s.stale]), [['foo', 'explained', true]]);
+    assert.strictEqual(sidecarFor(file).sections[0].stale, true);
+
+    // A generating run asks the assistant again (the code changed) and clears the mark.
+    await api.twin.updateAfterChange(file);
+    assert.strictEqual(router.segment.callCount, 2, 'updateAfterChange may outline with the assistant');
+    assert.strictEqual(router.explain.callCount, 2);
+    assert.ok(!readText(twinPath).includes(STALE_LINE));
   });
 
   /** A long source, its twin beside it, the sidecar and the function map (40 functions). */

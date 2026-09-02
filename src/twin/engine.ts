@@ -18,7 +18,7 @@ import { isTwinPath, sourceNameForTwin, twinPathFrom } from './pure/naming';
 import { isFullyExplained, parseTwin, type ParsedTwin } from './pure/parse';
 import { renderTwin, type SectionContent } from './pure/render';
 import { deleteSidecar, readSidecar, sidecarPathFor, writeSidecar } from './pure/sidecar';
-import { fileSummaryOf, functionText, planSections, snapshotDocument, toRenderSections, toSidecarSections, type GenerateMode, type PlanEntry, type TwinPlan, type TwinSidecar } from './pure/stale';
+import { fileSummaryOf, functionText, outlineUnavailable, planSections, planWithoutOutline, previousSections, snapshotDocument, toRenderSections, toSidecarSections, type GenerateMode, type PlanEntry, type TwinPlan, type TwinSidecar } from './pure/stale';
 import { minimalLineReplace } from './pure/textEdit';
 import { askInfo, errorMessage, isTestMode, notice } from './prompt';
 
@@ -403,8 +403,11 @@ export class TwinEngineImpl implements TwinEngine {
         return { sourcePath: abs, twinPath, map, plan: { entries: [], toGenerate: [] }, request: { fileName: path.basename(abs), languageId: doc.languageId, functions: [] }, fresh: true };
       }
     }
+    // The estimate runs BEFORE the person confirms the backfill, so it never spends credits on AI
+    // segmentation; a file only an assistant can outline is counted with 0 functions here and
+    // outlined for real when its turn comes in the run.
     const map = await this.functionMap(doc);
-    const plan = planSections(map, sidecar, parsed, { kind: 'changed' });
+    const { plan } = this.planFor(map, sidecar, parsed, { kind: 'changed' }, textHashOf(text));
     return { sourcePath: abs, twinPath, map, plan, request: this.requestFor(doc, map, plan.toGenerate), fresh: false };
   }
 
@@ -429,13 +432,31 @@ export class TwinEngineImpl implements TwinEngine {
     return run;
   }
 
-  private async functionMap(doc: TextDocumentLike, token?: CancelToken): Promise<FunctionMap> {
+  /**
+   * Function map for the text being explained. `allowAi` unlocks the structure engine's AI-segmentation
+   * last resort (REQ-012), which spends assistant credits: only a run that is about to generate
+   * explanations anyway may ask for it. Staleness marks, scroll sync and the backfill estimate never do.
+   */
+  private async functionMap(doc: TextDocumentLike, token?: CancelToken, allowAi = false): Promise<FunctionMap> {
     const open = this.openDocument(doc.fsPath!);
     const what = `Finding functions in ${path.basename(doc.fsPath!)}`;
+    const structureOpts = { token, ...(allowAi ? { allowAi: true } : {}) };
     // Symbols from the live document only when it holds the same text we are explaining.
     const useOpen = open !== undefined && open.getText() === doc.getText();
-    const p = useOpen ? this.deps.structure.getFunctionMap(toDocLike(open), { token }) : this.deps.structure.getFunctionMapForText(doc.getText(), doc.languageId, doc.uri, { token });
+    const p = useOpen ? this.deps.structure.getFunctionMap(toDocLike(open), structureOpts) : this.deps.structure.getFunctionMapForText(doc.getText(), doc.languageId, doc.uri, structureOpts);
     return withTimeout(p, STRUCTURE_TIMEOUT_MS, what, token);
+  }
+
+  /**
+   * The plan for a run. When nothing could outline the file this time but a twin with sections exists
+   * (a staleness pass without AI segmentation, a disconnected assistant, an AI outline that timed out),
+   * the old sections are kept and marked out of date instead of being replaced by "no functions".
+   */
+  private planFor(map: FunctionMap, sidecar: TwinSidecar | undefined, parsed: ParsedTwin | undefined, mode: GenerateMode, textHash: string): { plan: TwinPlan; outlined: boolean } {
+    if (outlineUnavailable(map, previousSections(sidecar, parsed))) {
+      return { plan: planWithoutOutline(map, sidecar, parsed, !sidecar || sidecar.textHash !== textHash), outlined: false };
+    }
+    return { plan: planSections(map, sidecar, parsed, mode), outlined: true };
   }
 
   /**
@@ -505,10 +526,18 @@ export class TwinEngineImpl implements TwinEngine {
       return { twin: this.toTwinFile(doc.uri, twinPath, sidecar), sent: 0, skipped: 'fast-path' };
     }
 
-    const map = await this.functionMap(doc, opts.token);
+    // Runs that may generate (ensureTwin, updateAfterChange, regenerateSection, backfill) may also pay for
+    // the AI-segmentation last resort; a staleness pass (mode `none`) never spends credits.
+    const mayGenerate = typeof opts.mode === 'function' || opts.mode.kind !== 'none';
+    const map = await this.functionMap(doc, opts.token, mayGenerate);
     const mode = typeof opts.mode === 'function' ? opts.mode(map) : opts.mode;
     const bypassCache = opts.bypassCache || (opts.bypassCacheWhen ? opts.bypassCacheWhen(map) : false);
-    const plan = planSections(map, sidecar, parsed, mode);
+    const { plan, outlined } = this.planFor(map, sidecar, parsed, mode, textHash);
+    if (!outlined) {
+      const msg = `ExplainIT could not find the functions in ${base} this time, so the existing twin is kept and marked out of date.`;
+      this.log.warn(`${msg} (mode ${mode.kind}, ${plan.entries.length} sections kept)`);
+      if (!opts.silent && mayGenerate) notice('warn', `${msg} Check the assistant connection with "ExplainIT: Doctor" and try again.`);
+    }
     const produced = new Map<string, SectionContent>();
     const pending = new Set(plan.toGenerate.map((e) => e.fn.id));
 

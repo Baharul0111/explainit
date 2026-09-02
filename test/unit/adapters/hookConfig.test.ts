@@ -7,12 +7,16 @@ import {
   findOurEntries,
   isOurHook,
   parseJsonFile,
+  pinArgs,
   removeOurEntries,
   stringifyJsonFile,
   upsertOurEntries,
+  type HookPins,
 } from '../../../src/adapters/pure/hookConfig';
 
 const WRAPPER = '"/Users/me/.explainit/hooks/explainit-hook.sh"';
+const PINS: HookPins = { explainitHome: '/Users/me/.explainit', claudeHome: '/Users/me/.claude', codexHome: '/Users/me/.codex', platform: 'darwin' };
+const PIN_ARGS = '--home "/Users/me/.explainit" --claude-home "/Users/me/.claude" --codex-home "/Users/me/.codex"';
 
 function userSettings(): Record<string, any> {
   return {
@@ -27,29 +31,61 @@ function userSettings(): Record<string, any> {
 
 suite('adapters/pure/hookConfig', () => {
   test('claude specs carry the watchdog and PostToolUse variant', () => {
-    const specs = claudeEntrySpecs(WRAPPER, 90);
+    const specs = claudeEntrySpecs(WRAPPER, 90, PINS);
     assert.strictEqual(specs.length, 2);
     assert.strictEqual(specs[0].event, 'PreToolUse');
     assert.strictEqual(specs[0].matcher, 'Write|Edit|MultiEdit|NotebookEdit|Bash');
-    assert.strictEqual(specs[0].command, `${WRAPPER} --agent claude --watchdog 90`);
+    assert.strictEqual(specs[0].command, `${WRAPPER} --agent claude --watchdog 90 ${PIN_ARGS}`);
     assert.strictEqual(specs[0].timeout, 7200);
     assert.strictEqual(specs[1].event, 'PostToolUse');
     assert.strictEqual(specs[1].matcher, 'Write|Edit|MultiEdit|NotebookEdit');
-    assert.strictEqual(specs[1].command, `${WRAPPER} --agent claude --event PostToolUse`);
+    assert.strictEqual(specs[1].command, `${WRAPPER} --agent claude --event PostToolUse ${PIN_ARGS}`);
     assert.strictEqual(specs[1].timeout, 10);
   });
 
   test('codex specs use the codex matchers and agent flag', () => {
-    const specs = codexEntrySpecs(WRAPPER, 120);
+    const specs = codexEntrySpecs(WRAPPER, 120, PINS);
     assert.strictEqual(specs[0].matcher, 'apply_patch|Edit|Write|Bash');
-    assert.strictEqual(specs[0].command, `${WRAPPER} --agent codex --watchdog 120`);
+    assert.strictEqual(specs[0].command, `${WRAPPER} --agent codex --watchdog 120 --unresponsive deny ${PIN_ARGS}`);
     assert.strictEqual(specs[1].matcher, 'apply_patch|Edit|Write');
     assert.ok(specs[1].command.includes('--event PostToolUse'));
   });
 
   test('watchdog below 30 s is clamped and a bad value falls back to 120', () => {
-    assert.ok(claudeEntrySpecs(WRAPPER, 5)[0].command.endsWith('--watchdog 30'));
-    assert.ok(claudeEntrySpecs(WRAPPER, NaN)[0].command.endsWith('--watchdog 120'));
+    assert.ok(claudeEntrySpecs(WRAPPER, 5, PINS)[0].command.includes('--watchdog 30 '));
+    assert.ok(claudeEntrySpecs(WRAPPER, NaN, PINS)[0].command.includes('--watchdog 120 '));
+  });
+
+  test('every command pins --home, --claude-home and --codex-home so the hook never trusts the environment', () => {
+    for (const spec of [...claudeEntrySpecs(WRAPPER, 120, PINS), ...codexEntrySpecs(WRAPPER, 120, PINS)]) {
+      assert.ok(spec.command.includes('--home "/Users/me/.explainit"'), spec.command);
+      assert.ok(spec.command.includes('--claude-home "/Users/me/.claude"'), spec.command);
+      assert.ok(spec.command.includes('--codex-home "/Users/me/.codex"'), spec.command);
+    }
+  });
+
+  test('pins are quoted for the platform shell and special characters survive', () => {
+    assert.strictEqual(pinArgs(PINS), PIN_ARGS);
+    const win = pinArgs({ explainitHome: 'C:\\Users\\me\\.explainit', claudeHome: 'C:\\Users\\me\\.claude', codexHome: 'D:\\codex home', platform: 'win32' });
+    assert.strictEqual(win, '--home "C:\\Users\\me\\.explainit" --claude-home "C:\\Users\\me\\.claude" --codex-home "D:\\codex home"');
+    const odd = pinArgs({ ...PINS, explainitHome: '/h/$weird "dir"' });
+    assert.ok(odd.startsWith('--home "/h/\\$weird \\"dir\\""'), odd);
+  });
+
+  test('codex PreToolUse carries --unresponsive from the setting (deny unless passthrough was chosen)', () => {
+    assert.ok(codexEntrySpecs(WRAPPER, 120, PINS)[0].command.includes('--unresponsive deny'));
+    assert.ok(codexEntrySpecs(WRAPPER, 120, { ...PINS, codexUnresponsive: 'passthrough' })[0].command.includes('--unresponsive passthrough'));
+    assert.ok(codexEntrySpecs(WRAPPER, 120, { ...PINS, codexUnresponsive: 'deny' })[0].command.includes('--unresponsive deny'));
+    assert.ok(!codexEntrySpecs(WRAPPER, 120, PINS)[1].command.includes('--unresponsive'), 'PostToolUse never waits, so it carries no mode');
+    assert.ok(!claudeEntrySpecs(WRAPPER, 120, { ...PINS, codexUnresponsive: 'passthrough' })[0].command.includes('--unresponsive'), 'Claude keeps ask');
+  });
+
+  test('the integrity hash covers the pinned locations and the codex mode', () => {
+    const base = configHashFor(codexEntrySpecs(WRAPPER, 120, PINS));
+    assert.notStrictEqual(base, configHashFor(codexEntrySpecs(WRAPPER, 120, { ...PINS, explainitHome: '/rogue' })));
+    assert.notStrictEqual(base, configHashFor(codexEntrySpecs(WRAPPER, 120, { ...PINS, claudeHome: '/rogue/.claude' })));
+    assert.notStrictEqual(base, configHashFor(codexEntrySpecs(WRAPPER, 120, { ...PINS, codexHome: '/rogue/.codex' })));
+    assert.notStrictEqual(base, configHashFor(codexEntrySpecs(WRAPPER, 120, { ...PINS, codexUnresponsive: 'passthrough' })));
   });
 
   test('isOurHook recognises only commands containing explainit-hook', () => {
@@ -61,7 +97,7 @@ suite('adapters/pure/hookConfig', () => {
 
   test('upsert preserves unrelated hooks and settings, appends ours', () => {
     const root = userSettings();
-    const changed = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120));
+    const changed = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120, PINS));
     assert.ok(changed);
     assert.strictEqual(root.model, 'opus');
     assert.deepStrictEqual(root.permissions, { allow: ['Bash(npm test)'] });
@@ -75,25 +111,25 @@ suite('adapters/pure/hookConfig', () => {
 
   test('upsert is idempotent and replaces stale entries of ours', () => {
     const root = userSettings();
-    upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120));
-    const again = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120));
+    upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120, PINS));
+    const again = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120, PINS));
     assert.strictEqual(again, false);
-    const replaced = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 300));
+    const replaced = upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 300, PINS));
     assert.ok(replaced);
     const ours = findOurEntries(root);
     assert.strictEqual(ours.length, 2);
-    assert.ok(ours.find((e) => e.event === 'PreToolUse')!.command.endsWith('--watchdog 300'));
+    assert.ok(ours.find((e) => e.event === 'PreToolUse')!.command.includes('--watchdog 300 '));
     assert.strictEqual(root.hooks.PreToolUse.length, 2, 'stale group removed, not duplicated');
   });
 
   test('removal leaves other hooks intact and drops empty containers', () => {
     const root = userSettings();
-    upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120));
+    upsertOurEntries(root, claudeEntrySpecs(WRAPPER, 120, PINS));
     assert.ok(removeOurEntries(root));
     assert.deepStrictEqual(root.hooks, userSettings().hooks);
     assert.strictEqual(removeOurEntries(root), false);
     const only: Record<string, any> = { hooks: {} };
-    upsertOurEntries(only, codexEntrySpecs(WRAPPER, 120));
+    upsertOurEntries(only, codexEntrySpecs(WRAPPER, 120, PINS));
     removeOurEntries(only);
     assert.strictEqual(only.hooks, undefined, 'empty hooks object removed');
   });
@@ -107,7 +143,7 @@ suite('adapters/pure/hookConfig', () => {
   });
 
   test('entriesMatch detects missing, changed and extra entries', () => {
-    const specs = claudeEntrySpecs(WRAPPER, 120);
+    const specs = claudeEntrySpecs(WRAPPER, 120, PINS);
     const root = userSettings();
     assert.strictEqual(entriesMatch(root, specs).ok, false);
     upsertOurEntries(root, specs);
@@ -122,8 +158,8 @@ suite('adapters/pure/hookConfig', () => {
   });
 
   test('configHashFor is stable and changes with the watchdog', () => {
-    assert.strictEqual(configHashFor(claudeEntrySpecs(WRAPPER, 120)), configHashFor(claudeEntrySpecs(WRAPPER, 120)));
-    assert.notStrictEqual(configHashFor(claudeEntrySpecs(WRAPPER, 120)), configHashFor(claudeEntrySpecs(WRAPPER, 121)));
+    assert.strictEqual(configHashFor(claudeEntrySpecs(WRAPPER, 120, PINS)), configHashFor(claudeEntrySpecs(WRAPPER, 120, PINS)));
+    assert.notStrictEqual(configHashFor(claudeEntrySpecs(WRAPPER, 120, PINS)), configHashFor(claudeEntrySpecs(WRAPPER, 121, PINS)));
   });
 
   test('parseJsonFile keeps indent, EOL and trailing newline; stringify reproduces them', () => {

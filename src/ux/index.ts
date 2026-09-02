@@ -52,6 +52,14 @@ export function createUx(deps: UxDeps): UxHandle {
     await deps.state.update((s) => {
       s.checkpointPaused = paused;
     });
+    // Pausing or resuming ends every "accept the rest of this file/session" (security review F3): an
+    // acceptance given before the pause must not silently cover writes made after it. The gate clears
+    // its own memory too; doing it here as well costs nothing and never weakens anything.
+    try {
+      deps.memory.clearAll();
+    } catch (e) {
+      logger.warn('could not clear decision memory on pause/resume', e);
+    }
     deps.gate.setPaused(paused);
     banner.show(paused);
     statusBar.refresh();

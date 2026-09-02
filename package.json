@@ -355,6 +355,19 @@
           ],
           "default": "info",
           "description": "Local log detail (Output panel and a rolling file in your home folder). Nothing is ever sent anywhere."
+        },
+        "explainit.checkpoint.codexUnresponsive": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "passthrough"
+          ],
+          "default": "deny",
+          "enumDescriptions": [
+            "Refuse the change with a \"try again in a moment\" reason, so nothing slips through unchecked.",
+            "Let Codex follow its own approval policy (under full-auto that means the change lands without a prompt)."
+          ],
+          "description": "Codex has no way to show its own prompt when ExplainIT does not answer within the watchdog time. Choose what the checkpoint does then."
         }
       }
     },

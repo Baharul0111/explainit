@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import type { ExplainRequest, GenerationOptions, TextDocumentLike } from '../../../src/core/interfaces';
+import type { AiSegment, ExplainRequest, GenerationOptions, TextDocumentLike } from '../../../src/core/interfaces';
 import type { Explanation } from '../../../src/core/types';
 import type { ExplainitApi } from '../../../src/extension';
 
@@ -37,17 +37,21 @@ export function fakeExplanation(f: { functionId: string; name: string; contentHa
 
 export interface RouterStub {
   explain: sinon.SinonStub;
+  /** The AI-segmentation stub (`segmentWithAi`); answers `opts.segments`, else nothing. */
+  segment: sinon.SinonStub;
   requests: ExplainRequest[];
   restore(): void;
 }
 
 /**
  * Replace the router's model calls with a deterministic fake. `delayMs` delays every request;
- * `perFunctionMs` streams each explanation through progress.onExplanation with that spacing.
+ * `perFunctionMs` streams each explanation through progress.onExplanation with that spacing;
+ * `segments` is what the AI-segmentation last resort answers for any file.
  */
-export function stubRouter(api: ExplainitApi, opts: { delayMs?: number; perFunctionMs?: number; failWith?: string } = {}): RouterStub {
+export function stubRouter(api: ExplainitApi, opts: { delayMs?: number; perFunctionMs?: number; failWith?: string; segments?: AiSegment[] } = {}): RouterStub {
   const requests: ExplainRequest[] = [];
   const sandbox = sinon.createSandbox();
+  const segment = sandbox.stub(api.router, 'segmentWithAi').callsFake(async () => (opts.segments ?? []).map((s) => ({ ...s })));
   const explain = sandbox.stub(api.router, 'explainFunctions').callsFake(async (req: ExplainRequest, o?: GenerationOptions) => {
     requests.push(req);
     if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
@@ -69,7 +73,7 @@ export function stubRouter(api: ExplainitApi, opts: { delayMs?: number; perFunct
   };
   sandbox.stub(api.router, 'resolveChannel').resolves('claude');
   sandbox.stub(api.router, 'availableChannels').resolves([{ channel: 'claude', available: true }]);
-  return { explain, requests, restore: () => sandbox.restore() };
+  return { explain, segment, requests, restore: () => sandbox.restore() };
 }
 
 /** Update an `editor.*` setting for the test user (undefined removes the override). */

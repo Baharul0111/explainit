@@ -250,10 +250,11 @@ export async function checkHookWiring(d: DoctorDeps): Promise<DoctorCheck> {
   if (!d.gateInfo()) return check(name, false, 'Skipped: the checkpoint is not running.');
   if (d.gatePaused()) return check(name, false, 'Skipped: the checkpoint is paused, so hooks get no answer by design.', { label: 'Resume the checkpoint', run: d.fixes.resumeCheckpoint });
   const outcome = await d.hookLiveTest(folder);
+  const via = outcome.via ? ` Run ${outcome.via}.` : '';
   if (outcome.answered) {
-    return check(name, true, `The hook script reached the checkpoint and got an answer (${outcome.decision}) for a synthetic twin-file write. Nothing was written.`);
+    return check(name, true, `The hook script reached the checkpoint and got an answer (${outcome.decision}) for a synthetic twin-file write. Nothing was written.${via}`);
   }
-  return check(name, false, `The hook script did not get an answer from the checkpoint: ${outcome.problem ?? 'unknown problem'}. Reload the window and run the Doctor again.`, {
+  return check(name, false, `The hook script did not get an answer from the checkpoint: ${outcome.problem ?? 'unknown problem'}.${via} Reload the window and run the Doctor again.`, {
     label: 'Re-arm the hooks',
     run: d.fixes.rearm,
   });

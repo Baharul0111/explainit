@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DetectResult } from '../core/interfaces';
 import type { AdapterRecord } from '../core/state';
-import { HookAgentBase, findExtensionDir, friendlyPath, isFile, type AdapterEnv, type AgentAdapterSpec, type IntegrityCheck } from './installer';
+import { HookAgentBase, codexHomeDir, findExtensionDir, friendlyPath, isFile, type AdapterEnv, type AgentAdapterSpec, type IntegrityCheck } from './installer';
 import { codexEntrySpecs, findOurEntries, parseJsonFile } from './pure/hookConfig';
 import { codexHookHash, lookupTrust, parseHookStates, type TrustLookup } from './pure/codexTrust';
 import { findOnPath, splitCliValue } from './pure/pathLookup';
@@ -18,10 +18,7 @@ import { VERSION_TIMEOUT_MS } from './claude';
 export const CODEX_TRUST_STEP =
   'Codex only runs hooks you have trusted: open codex in a terminal once, and when it shows the ExplainIT hook choose Trust (or type /hooks). The Codex VS Code extension uses the same trust record.';
 
-/** Codex keeps everything under CODEX_HOME when that is set, else ~/.codex (shared by the CLI and the VS Code extension). */
-export function codexHomeDir(env: Pick<AdapterEnv, 'userHome' | 'codexHome'>): string {
-  return env.codexHome ?? path.join(env.userHome, '.codex');
-}
+export { codexHomeDir };
 
 export const CODEX_SPEC: AgentAdapterSpec = {
   agent: 'codex',
