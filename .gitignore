@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+.env
+.env.*
+.DS_Store
+*_explain.txt
+.explainit/
+coverage/
+*.log
+eval/results/

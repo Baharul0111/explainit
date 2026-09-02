@@ -1,0 +1,491 @@
+{
+  "name": "explainit",
+  "displayName": "ExplainIT",
+  "description": "A plain-English twin for every code file, and a human checkpoint in front of every change your AI coding assistant makes. Local only. Uses the assistants you already have.",
+  "version": "0.1.0",
+  "publisher": "BaharulIslam",
+  "license": "MIT",
+  "author": {
+    "name": "Baharul Islam"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Baharul0111/explainit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Baharul0111/explainit/issues"
+  },
+  "homepage": "https://github.com/Baharul0111/explainit#readme",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1e2a38",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "AI",
+    "Education",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "explain",
+    "plain english",
+    "claude code",
+    "codex",
+    "copilot",
+    "code review",
+    "human in the loop",
+    "twin"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "ExplainIT reads and writes twin files beside your code and runs your assistant CLIs; it does this only in trusted workspaces."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "ExplainIT needs real files on disk for twins, restore points and the checkpoint."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "explainit.openTwin",
+        "title": "Open plain-English twin",
+        "category": "ExplainIT",
+        "icon": "$(book)"
+      },
+      {
+        "command": "explainit.regenerateSection",
+        "title": "Regenerate this section",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.regenerateFile",
+        "title": "Regenerate the whole twin for this file",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.toggleAutoOpen",
+        "title": "Turn automatic twin opening on/off",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.backfill",
+        "title": "Backfill the whole project",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.backfillPause",
+        "title": "Pause backfill",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.backfillResume",
+        "title": "Resume backfill",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.backfillCancel",
+        "title": "Cancel backfill",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.pauseCheckpoint",
+        "title": "Pause the checkpoint (let assistants use their own prompts)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.resumeCheckpoint",
+        "title": "Resume the checkpoint",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.doctor",
+        "title": "Doctor: check everything is installed, armed and healthy",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.setupAssistants",
+        "title": "Set up assistants (permission, detection, connect)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.installClaudeHook",
+        "title": "Connect Claude Code (install the checkpoint hook)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.installCodexHook",
+        "title": "Connect Codex (install the checkpoint hook)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.installCopilotSteering",
+        "title": "Connect Copilot (review overlay and instructions)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.uninstallHooks",
+        "title": "Disconnect assistants (remove the checkpoint hooks)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.restoreFile",
+        "title": "Restore a file from a restore point",
+        "category": "ExplainIT",
+        "icon": "$(history)"
+      },
+      {
+        "command": "explainit.restoreCheckpoint",
+        "title": "Restore this restore point",
+        "category": "ExplainIT",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "explainit.showJournal",
+        "title": "Show the change journal",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.verifyJournal",
+        "title": "Verify the change journal has not been tampered with",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.offerSharedGitignore",
+        "title": "Add *_explain.txt to the shared .gitignore (optional)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.updateInstructions",
+        "title": "Update assistant instruction files (CLAUDE.md, AGENTS.md, copilot-instructions.md)",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.selectChannel",
+        "title": "Choose which assistant writes explanations",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.showLogs",
+        "title": "Show logs",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.openRunbooks",
+        "title": "Help: the five most likely problems",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.showStatus",
+        "title": "Show status",
+        "category": "ExplainIT"
+      },
+      {
+        "command": "explainit.refreshJournalView",
+        "title": "Refresh",
+        "category": "ExplainIT",
+        "icon": "$(refresh)"
+      }
+    ],
+    "configuration": {
+      "title": "ExplainIT",
+      "properties": {
+        "explainit.twin.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the plain-English twin beside a code file the moment it opens."
+        },
+        "explainit.twin.scrollSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep the twin scrolled in step with the code."
+        },
+        "explainit.twin.stalenessMarks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mark a twin section as out of date when its function changes."
+        },
+        "explainit.assistant.channel": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "copilot",
+            "claude",
+            "codex"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use whichever connected assistant is available (Copilot via VS Code, then Claude Code, then Codex).",
+            "GitHub Copilot models through VS Code (uses your Copilot plan).",
+            "Claude Code CLI or the Claude Code VS Code extension (uses your Claude plan).",
+            "Codex CLI or the Codex VS Code extension (uses your ChatGPT plan)."
+          ],
+          "description": "Which connected assistant writes the explanations."
+        },
+        "explainit.assistant.tokenThrift": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send only the function body and a minimal file summary to the assistant, never whole files."
+        },
+        "explainit.assistant.timeoutSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "How long to wait for one explanation request before giving up."
+        },
+        "explainit.assistant.claudeCliPath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to the Claude Code CLI. Leave as \"claude\" to find it on PATH or inside the Claude Code VS Code extension."
+        },
+        "explainit.assistant.codexCliPath": {
+          "type": "string",
+          "default": "codex",
+          "description": "Path to the Codex CLI. Leave as \"codex\" to find it on PATH or inside the Codex VS Code extension."
+        },
+        "explainit.checkpoint.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stop every Claude Code / Codex file change for per-function approval. Turning this off shows a banner and lets the assistants use their own prompts."
+        },
+        "explainit.checkpoint.watchdogSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 30,
+          "maximum": 600,
+          "description": "If ExplainIT stops responding, the assistant falls back to its own permission prompt after this many seconds."
+        },
+        "explainit.checkpoint.shellWrites": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "ask",
+            "ignore"
+          ],
+          "default": "deny",
+          "enumDescriptions": [
+            "Refuse shell commands that edit code files in place and tell the assistant to use its edit tool so the change can be reviewed.",
+            "Hand such commands to the assistant's own permission prompt.",
+            "Do not inspect shell commands (protected paths are still refused)."
+          ],
+          "description": "What to do when an assistant tries to change code files through a shell command instead of its edit tool."
+        },
+        "explainit.checkpoint.batchTrivialChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Group whitespace-only and comment-only changes into one approval."
+        },
+        "explainit.checkpoint.allowAcceptRestOfSession": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer \"Accept the rest of this file\" and \"Accept the rest of this session\" buttons."
+        },
+        "explainit.backfill.maxFunctionsPerRequest": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Functions per assistant request during backfill (hard cap 20)."
+        },
+        "explainit.backfill.excludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/dist/**",
+            "**/out/**",
+            "**/build/**",
+            "**/*.min.js",
+            "**/vendor/**"
+          ],
+          "description": "Files skipped by \"Backfill the whole project\"."
+        },
+        "explainit.journal.maxEntries": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 100,
+          "description": "Journal entries kept before the oldest half is archived."
+        },
+        "explainit.restorePoints.maxPerFile": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Restore points kept per file."
+        },
+        "explainit.restorePoints.maxTotalMB": {
+          "type": "number",
+          "default": 200,
+          "minimum": 10,
+          "description": "Total disk space for restore points per workspace."
+        },
+        "explainit.copilot.reviewOverlay": {
+          "type": "boolean",
+          "default": true,
+          "description": "For Copilot (which cannot be stopped before writing): overlay per-function explanations on its saved changes so you can review them with Copilot's own Keep/Undo."
+        },
+        "explainit.instructions.autoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep the ExplainIT sections in CLAUDE.md, AGENTS.md and .github/copilot-instructions.md up to date."
+        },
+        "explainit.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Local log detail (Output panel and a rolling file in your home folder). Nothing is ever sent anywhere."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "explainit",
+          "title": "ExplainIT",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "explainit": [
+        {
+          "id": "explainit.journalView",
+          "name": "Changes and restore points",
+          "icon": "media/activity.svg",
+          "contextualTitle": "ExplainIT"
+        },
+        {
+          "id": "explainit.statusView",
+          "name": "Status",
+          "icon": "media/activity.svg",
+          "contextualTitle": "ExplainIT"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "explainit.journalView",
+        "contents": "No changes recorded yet. When an assistant proposes a change, it appears here with a restore point.\n[Run the Doctor](command:explainit.doctor)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "explainit.openTwin",
+          "group": "navigation@50",
+          "when": "resourceScheme == file && !(resourceFilename =~ /_explain\\.txt$/)"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "explainit.regenerateSection",
+          "group": "explainit@1",
+          "when": "resourceFilename =~ /_explain\\.txt$/"
+        },
+        {
+          "command": "explainit.regenerateFile",
+          "group": "explainit@2",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "explainit.openTwin",
+          "group": "explainit@3",
+          "when": "resourceScheme == file && !(resourceFilename =~ /_explain\\.txt$/)"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "explainit.restoreFile",
+          "group": "explainit@1",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "explainit.refreshJournalView",
+          "when": "view == explainit.journalView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "explainit.restoreCheckpoint",
+          "when": "view == explainit.journalView && viewItem == checkpoint",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "explainit.refreshJournalView",
+          "when": "false"
+        },
+        {
+          "command": "explainit.restoreCheckpoint",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs --production",
+    "build:dev": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "compile": "tsc -p ./",
+    "lint": "eslint src test eval --ext .ts",
+    "typecheck": "tsc -p ./ --noEmit",
+    "test:unit": "npm run compile && mocha \"out/test/unit/**/*.test.js\" \"out/eval/**/*.test.js\" --timeout 20000",
+    "test:conformance": "npm run compile && mocha \"out/test/conformance/**/*.test.js\" --timeout 120000",
+    "test:integration": "npm run compile && npm run build:dev && vscode-test",
+    "test:install": "npm run compile && node out/test/install-smoke/run.js",
+    "test": "npm run test:unit && npm run test:conformance && npm run test:integration",
+    "package": "vsce package --no-dependencies",
+    "eval": "npm run compile && node out/eval/run.js",
+    "publish:marketplace": "vsce publish --no-dependencies",
+    "publish:openvsx": "ovsx publish --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.20.1",
+    "@types/sinon": "^22.0.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "glob": "^11.1.0",
+    "mocha": "^11.8.0",
+    "ovsx": "^1.1.1",
+    "rimraf": "^6.1.3",
+    "sinon": "^22.1.0",
+    "typescript": "~5.9",
+    "typescript-eslint": "^8.69.0"
+  },
+  "dependencies": {
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "ajv": "^8.20.0",
+    "diff": "^9.0.0"
+  }
+}
