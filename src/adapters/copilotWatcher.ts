@@ -313,7 +313,7 @@ export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngi
     log.info('copilot review overlay stopped');
   }
 
-  return {
+  const watcher: CopilotWatcher & { __test?: { resetNotice(): void } } = {
     start,
     stop,
     get running() {
@@ -321,4 +321,7 @@ export function createCopilotWatcher(deps: CoreDeps & { structure: StructureEngi
     },
     dispose: () => stop(),
   };
+  // Integration tests share one extension host; let them start from "notice not shown yet".
+  if (process.env.EXPLAINIT_TEST_MODE === '1') watcher.__test = { resetNotice: () => { noticeShown = false; } };
+  return watcher;
 }

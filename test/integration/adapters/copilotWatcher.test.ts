@@ -28,6 +28,8 @@ suite('copilot watcher (integration)', function () {
   suiteSetup(async () => {
     info = sinon.stub(vscode.window, 'showInformationMessage').resolves(undefined);
     api = (await vscode.extensions.getExtension('BaharulIslam.explainit')!.activate()) as Api;
+    // Earlier suites in the same extension host may already have triggered the once-per-host notice.
+    (api.copilot as { __test?: { resetNotice(): void } }).__test?.resetNotice();
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'explainit-copilot-'));
     file = path.join(dir, 'app.py');
     const fixture = path.join(vscode.workspace.workspaceFolders![0].uri.fsPath, 'src', 'app.py');
