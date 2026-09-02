@@ -72,11 +72,23 @@ jobs:
 
       - name: Integration tests inside VS Code (Linux, under xvfb)
         if: runner.os == 'Linux'
+        env:
+          EXPLAINIT_HOME: ${{ runner.temp }}/explainit-home
         run: xvfb-run -a npm run test:integration
 
       - name: Integration tests inside VS Code
         if: runner.os != 'Linux'
+        env:
+          EXPLAINIT_HOME: ${{ runner.temp }}/explainit-home
         run: npm run test:integration
+
+      - name: Upload ExplainIT logs when the integration tests fail
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: explainit-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/explainit-home/logs
+          if-no-files-found: ignore
 
       - name: Package the VSIX (vsce --no-dependencies)
         run: npm run package

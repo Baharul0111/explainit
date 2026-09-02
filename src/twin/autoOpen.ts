@@ -54,6 +54,17 @@ export function registerAutoOpen(engine: TwinEngineImpl, deps: { settings: Setti
   };
 
   deps.disposables.push(vscode.window.onDidChangeActiveTextEditor(consider));
+  // A code editor that becomes visible without ever being "active" (focus stolen by a panel) still counts.
+  const seenVisible = new WeakSet<vscode.TextDocument>();
+  deps.disposables.push(
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      for (const e of editors) {
+        if (seenVisible.has(e.document)) continue;
+        seenVisible.add(e.document);
+        if (e.document.uri.scheme === 'file' && !isTwinPath(e.document.uri.fsPath)) consider(e);
+      }
+    }),
+  );
   deps.disposables.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
       if (doc.uri.scheme !== 'file') return;
@@ -68,10 +79,11 @@ export function registerAutoOpen(engine: TwinEngineImpl, deps: { settings: Setti
     vscode.workspace.onDidOpenTextDocument((doc) => {
       if (doc.uri.scheme === 'file' && !isTwinPath(doc.uri.fsPath)) closedByUser.delete(canonicalPath(doc.uri.fsPath));
       // Documents opened in the background (git, search, other extensions) never get twins; only ones
-      // that end up as the active editor do.
+      // that end up visible in an editor group do. Focus may already have moved on (to a panel such as
+      // an output channel, or to a quick pick), so look at the visible editors, not just the active one.
       setTimeout(() => {
-        const active = vscode.window.activeTextEditor;
-        if (active && active.document === doc) consider(active);
+        const shown = vscode.window.visibleTextEditors.find((e) => e.document === doc);
+        if (shown) consider(shown);
       }, DEBOUNCE_MS);
     }),
   );
