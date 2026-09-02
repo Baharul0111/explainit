@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in ExplainIT did not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please run **ExplainIT: Doctor** first (Command Palette); it fixes the most common problems and its report answers most of the questions below. Never paste tokens or private code.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: I opened app.py and expected app_explain.txt to open beside it, but ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor report
+      description: 'Run "ExplainIT: Doctor" and paste the report (it contains no code and no tokens).'
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: ExplainIT version, VS Code version, operating system, and which assistant (Claude Code, Codex, Copilot; CLI or VS Code extension).
+      placeholder: ExplainIT 0.1.0, VS Code 1.100.0, Windows 11, Claude Code CLI 2.1
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: 'From "ExplainIT: Show logs" (Output panel). Tokens are redacted automatically; please still check before pasting.'
+      render: text

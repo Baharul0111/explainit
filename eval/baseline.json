@@ -1,0 +1,82 @@
+{
+  "promptHash": "dfdec7145932fb362c2f69f715109bf948d7b80d6d0ab9371017e7050022fdc2",
+  "scores": {
+    "fake": {
+      "passAt1": 0.9167,
+      "style": 1,
+      "n": 12,
+      "ranAt": "2026-09-02T03:15:22.723Z"
+    },
+    "claude": {
+      "passAt1": 1,
+      "style": 1,
+      "n": 12,
+      "ranAt": "2026-09-02T03:15:57.780Z"
+    },
+    "codex": {
+      "passAt1": 1,
+      "style": 1,
+      "n": 12,
+      "ranAt": "2026-09-02T03:21:49.162Z"
+    }
+  },
+  "history": [
+    {
+      "ranAt": "2026-09-02T03:15:22.723Z",
+      "channel": "fake",
+      "promptHash": "dfdec7145932fb362c2f69f715109bf948d7b80d6d0ab9371017e7050022fdc2",
+      "scores": {
+        "fake": {
+          "passAt1": 0.9167,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:15:22.723Z"
+        }
+      }
+    },
+    {
+      "ranAt": "2026-09-02T03:15:57.780Z",
+      "channel": "claude",
+      "promptHash": "dfdec7145932fb362c2f69f715109bf948d7b80d6d0ab9371017e7050022fdc2",
+      "scores": {
+        "fake": {
+          "passAt1": 0.9167,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:15:22.723Z"
+        },
+        "claude": {
+          "passAt1": 1,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:15:57.780Z"
+        }
+      }
+    },
+    {
+      "ranAt": "2026-09-02T03:21:49.162Z",
+      "channel": "codex",
+      "promptHash": "dfdec7145932fb362c2f69f715109bf948d7b80d6d0ab9371017e7050022fdc2",
+      "scores": {
+        "fake": {
+          "passAt1": 0.9167,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:15:22.723Z"
+        },
+        "claude": {
+          "passAt1": 1,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:15:57.780Z"
+        },
+        "codex": {
+          "passAt1": 1,
+          "style": 1,
+          "n": 12,
+          "ranAt": "2026-09-02T03:21:49.162Z"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,287 @@
+{
+  "note": "Recorded explanations for the deterministic CI style test (eval/style.test.ts). Good ones follow the explanation contract; the ones marked expectedStyleOk:false break it on purpose, each in one clear way named in 'why'.",
+  "explanations": [
+    {
+      "id": "good-has-close-elements",
+      "name": "has_close_elements",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Checks whether any two numbers in a list are closer together than a given limit.",
+        "steps": [
+          "It compares every number with every other number in the list.",
+          "It works out the distance between each pair.",
+          "It answers yes as soon as one distance is smaller than the limit.",
+          "It answers no if no pair is that close."
+        ]
+      }
+    },
+    {
+      "id": "good-greatest-common-divisor",
+      "name": "greatest_common_divisor",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Finds the largest whole number that divides both of two numbers evenly.",
+        "steps": [
+          "It keeps going while the second number is not zero.",
+          "It replaces the pair with the second number and the remainder of dividing the first by the second.",
+          "It hands back the first number once the second reaches zero."
+        ]
+      }
+    },
+    {
+      "id": "good-flip-case",
+      "name": "flip_case",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Swaps the case of every letter in a piece of text.",
+        "steps": [
+          "It goes through each character of the text.",
+          "It turns capital letters into small ones and small letters into capitals.",
+          "It gives back the new text."
+        ]
+      }
+    },
+    {
+      "id": "good-car-race-collision",
+      "name": "car_race_collision",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Counts how many times cars from two opposite lanes pass each other.",
+        "steps": [
+          "It takes the number of cars in each lane.",
+          "It multiplies the number by itself because every car meets every car from the other lane."
+        ]
+      }
+    },
+    {
+      "id": "good-same-chars",
+      "name": "same_chars",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Tells whether two words are made of exactly the same set of letters.",
+        "steps": [
+          "It collects the distinct letters of the first word.",
+          "It collects the distinct letters of the second word.",
+          "It answers yes only when both collections match."
+        ],
+        "warnings": ["Repeated letters do not matter, only which letters appear."]
+      }
+    },
+    {
+      "id": "good-pluck",
+      "name": "pluck",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Picks the smallest even number from a list and reports it together with its position.",
+        "steps": [
+          "It gives back an empty list when the input is empty.",
+          "It keeps only the even numbers.",
+          "It gives back an empty list when there are no even numbers.",
+          "It finds the smallest even number.",
+          "It returns that number and the first position where it appears."
+        ]
+      }
+    },
+    {
+      "id": "good-prime-length",
+      "name": "prime_length",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Says whether the length of a piece of text is a prime number.",
+        "steps": [
+          "It counts the characters in the text.",
+          "It answers no when the count is zero or one.",
+          "It tries dividing the count by every smaller number starting from two.",
+          "It answers no if any division comes out even, otherwise yes."
+        ]
+      }
+    },
+    {
+      "id": "good-check-dict-case",
+      "name": "check_dict_case",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Checks whether every key in a dictionary is text written entirely in one case.",
+        "steps": [
+          "It answers no right away when the dictionary is empty.",
+          "It looks at each key in turn.",
+          "It gives up as soon as a key is not text or mixes capital and small letters.",
+          "It answers yes only when all keys share the same case."
+        ],
+        "uncertainty": "Keys with no letters at all are treated as neither case."
+      }
+    },
+    {
+      "id": "good-move-one-ball",
+      "name": "move_one_ball",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Decides whether a list of numbers can be put in rising order by repeatedly moving the last item to the front.",
+        "steps": [
+          "It answers yes for an empty list.",
+          "It works out what the sorted list would look like.",
+          "It tries every possible starting point for the rotation.",
+          "It answers yes if any rotation equals the sorted list."
+        ]
+      }
+    },
+    {
+      "id": "good-get-odd-collatz",
+      "name": "get_odd_collatz",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Lists, in rising order, the odd numbers met while shrinking a number down to one with the Collatz rule.",
+        "steps": [
+          "It starts with the given number.",
+          "It halves even numbers and triples-plus-one odd numbers until it reaches one.",
+          "It remembers every odd number it meets along the way.",
+          "It sorts the remembered numbers before handing them back."
+        ]
+      }
+    },
+    {
+      "id": "good-largest-smallest-integers",
+      "name": "largest_smallest_integers",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Finds the largest negative number and the smallest positive number in a list.",
+        "steps": [
+          "It separates the negative numbers from the positive ones.",
+          "It takes the biggest of the negatives and the smallest of the positives.",
+          "It uses None for either side when that group is empty."
+        ]
+      }
+    },
+    {
+      "id": "good-x-or-y",
+      "name": "x_or_y",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Returns one value when a number is prime and another value when it is not.",
+        "steps": [
+          "It treats one as not prime and gives back the second value.",
+          "It looks for a smaller number that divides the given number evenly.",
+          "It gives back the second value when it finds one.",
+          "It gives back the first value when nothing divides the number."
+        ]
+      }
+    },
+    {
+      "id": "good-server-start",
+      "name": "Server.start",
+      "expectedStyleOk": true,
+      "explanation": {
+        "summary": "Starts the web server so it can answer requests.",
+        "steps": [
+          "It picks the port from the settings.",
+          "It begins listening on that port.",
+          "It logs that it is ready."
+        ]
+      }
+    },
+    {
+      "id": "bad-jargon",
+      "name": "load_config",
+      "expectedStyleOk": false,
+      "why": "uses banned jargon (parses, iterates)",
+      "explanation": {
+        "summary": "Reads the settings file and parses it into a settings object.",
+        "steps": [
+          "It opens the file at the given path.",
+          "It iterates over every line.",
+          "It hands the object back."
+        ]
+      }
+    },
+    {
+      "id": "bad-too-many-steps",
+      "name": "render",
+      "expectedStyleOk": false,
+      "why": "six steps (limit is five)",
+      "explanation": {
+        "summary": "Draws the page on the screen.",
+        "steps": [
+          "It clears the screen.",
+          "It draws the header.",
+          "It draws the menu.",
+          "It draws the body.",
+          "It draws the footer.",
+          "It shows the result."
+        ]
+      }
+    },
+    {
+      "id": "bad-one-step",
+      "name": "noop",
+      "expectedStyleOk": false,
+      "why": "only one step (minimum is two)",
+      "explanation": {
+        "summary": "Does nothing at all.",
+        "steps": ["It returns right away."]
+      }
+    },
+    {
+      "id": "bad-no-period",
+      "name": "add",
+      "expectedStyleOk": false,
+      "why": "summary does not end with a period",
+      "explanation": {
+        "summary": "Adds two numbers together",
+        "steps": ["It takes the two numbers.", "It gives back their sum."]
+      }
+    },
+    {
+      "id": "bad-two-sentences",
+      "name": "save",
+      "expectedStyleOk": false,
+      "why": "summary is two sentences",
+      "explanation": {
+        "summary": "Saves the document. It also updates the title bar.",
+        "steps": ["It writes the text to disk.", "It marks the document as clean."]
+      }
+    },
+    {
+      "id": "bad-summary-too-long",
+      "name": "sync",
+      "expectedStyleOk": false,
+      "why": "summary longer than 160 characters",
+      "explanation": {
+        "summary": "Keeps the local copy of every file in step with the remote copy by comparing the two lists, downloading anything newer on the server, uploading anything newer here, and reporting conflicts.",
+        "steps": ["It compares the two lists.", "It moves the newer files each way."]
+      }
+    },
+    {
+      "id": "bad-step-too-long",
+      "name": "index",
+      "expectedStyleOk": false,
+      "why": "one step longer than 110 characters",
+      "explanation": {
+        "summary": "Builds a search index for the folder.",
+        "steps": [
+          "It walks through every file in the folder and every sub-folder, reading each one fully into memory before it looks at the words inside.",
+          "It stores the words it finds."
+        ]
+      }
+    },
+    {
+      "id": "bad-backticks",
+      "name": "fetch_user",
+      "expectedStyleOk": false,
+      "why": "code identifiers wrapped in backticks and a code arrow",
+      "explanation": {
+        "summary": "Looks up a user by id.",
+        "steps": ["It calls `db.get(id)` to load the record.", "It maps the row -> user object."]
+      }
+    },
+    {
+      "id": "bad-empty-summary",
+      "name": "cleanup",
+      "expectedStyleOk": false,
+      "why": "empty summary",
+      "explanation": {
+        "summary": "",
+        "steps": ["It deletes the temporary files.", "It closes the open handles."]
+      }
+    }
+  ]
+}

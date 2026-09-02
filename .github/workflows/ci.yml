@@ -1,0 +1,154 @@
+# ExplainIT CI: lint, type-check, unit + conformance tests, build, integration tests inside VS Code,
+# package the VSIX and install it into a fresh VS Code, on Windows, macOS and Linux (goal item 14).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels the superseded run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Never let CI phone home; the extension itself never does either (see the no-network job).
+  DO_NOT_TRACK: '1'
+  VSCODE_SKIP_PRELAUNCH: '1'
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Cache the downloaded VS Code (.vscode-test)
+        uses: actions/cache@v4
+        with:
+          path: .vscode-test/vscode-*
+          key: vscode-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.vscode-test.mjs') }}
+          restore-keys: |
+            vscode-test-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Install-smoke helper unit tests
+        run: npx mocha --ui tdd "out/test/install-smoke/test/**/*.test.js" --timeout 20000
+
+      - name: Hook conformance tests
+        run: npm run test:conformance
+
+      - name: Build (esbuild bundle + tree-sitter grammars)
+        run: npm run build
+
+      - name: Integration tests inside VS Code (Linux, under xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration
+
+      - name: Integration tests inside VS Code
+        if: runner.os != 'Linux'
+        run: npm run test:integration
+
+      - name: Package the VSIX (vsce --no-dependencies)
+        run: npm run package
+
+      - name: Fresh VS Code install smoke test (Linux, under xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:install
+
+      - name: Fresh VS Code install smoke test
+        if: runner.os != 'Linux'
+        run: npm run test:install
+
+      - name: Upload the VSIX
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: explainit-vsix
+          path: explainit-*.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+  no-network-and-security:
+    name: no-network-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build so the bundled dist/ is scanned too
+        run: npm run build
+
+      - name: No network usage outside 127.0.0.1 (src, hooks, dist, media)
+        run: node scripts/check-no-network.js
+
+      - name: Audit runtime dependencies (high or worse fails; dev-only advisories do not ship)
+        run: npm audit --audit-level=high --omit=dev
+
+      - name: No http(s) URLs in hooks/ and src/ outside the allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Allowed: loopback, comment lines, and the prefixes in scripts/network-allowlist.json.
+          node -e "for (const p of require('./scripts/network-allowlist.json').urlPrefixes) console.log(p)" > /tmp/allowed-prefixes.txt
+          hits=$(grep -rnE 'https?://' src hooks --include='*.ts' --include='*.js' \
+            | grep -vE '127\.0\.0\.1|localhost|\[::1\]' \
+            | grep -vE '^[^:]+:[0-9]+:\s*(//|\*|/\*|#)' \
+            | grep -vFf /tmp/allowed-prefixes.txt || true)
+          if [ -n "$hits" ]; then
+            echo "Found http(s) URLs in code that are not loopback and not allow-listed:"
+            echo "$hits"
+            echo "Remove them, or add a display-only link prefix to scripts/network-allowlist.json."
+            exit 1
+          fi
+          echo "OK: no unexpected http(s) URLs in src/ or hooks/."
+
+      - name: Hook script is dependency-free plain CommonJS
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -nE "require\(['\"][^./]" hooks/explainit-hook.js | grep -vE "require\(['\"](node:)?(fs|os|path|http|crypto|child_process|util|url|events)['\"]\)"; then
+            echo "hooks/explainit-hook.js must only require Node built-ins (it runs unchanged on every machine)."
+            exit 1
+          fi
+          node --check hooks/explainit-hook.js
+          echo "OK: hook script only uses Node built-ins and parses."

@@ -106,6 +106,8 @@ export interface GenerationOptions {
   /** Force a channel (otherwise: user pin -> availability -> fallback on error/quota). */
   channel?: Channel;
   timeoutMs?: number;
+  /** Skip the explanation cache for this call (Regenerate on unchanged code wants fresh wording). */
+  bypassCache?: boolean;
 }
 
 export interface ChangeExplainRequest {

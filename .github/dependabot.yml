@@ -1,0 +1,29 @@
+# Weekly dependency updates. Runtime deps (diff, ajv, tree-sitter-wasm) ship in the VSIX, so their
+# updates get their own PRs; dev tooling is grouped to keep the noise down.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    groups:
+      dev-tooling:
+        dependency-type: development
+        patterns: ['*']
+    ignore:
+      # The VS Code API typings must stay at the minimum engine version in package.json.
+      - dependency-name: '@types/vscode'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    labels: [dependencies, ci]

@@ -1,0 +1,17 @@
+{
+  "name": "explainit-install-probe",
+  "displayName": "ExplainIT install probe (test only)",
+  "description": "Tiny extension loaded with --extensionDevelopmentPath by test/install-smoke/run.ts. It drives the VSIX-installed ExplainIT end to end and writes a JSON result. Never published.",
+  "version": "0.0.1",
+  "publisher": "explainit-test",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {}
+}

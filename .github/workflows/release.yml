@@ -1,0 +1,142 @@
+# Manual release: build, package, unit-test, then publish to the VS Code Marketplace and/or Open VSX
+# and attach the VSIX to a GitHub release tagged v<version>. Publishing waits for Baharul's go-ahead:
+# this workflow only runs when started by hand, and dry-run (the default) publishes nothing.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        type: choice
+        required: true
+        default: both
+        options:
+          - marketplace
+          - openvsx
+          - both
+      dry-run:
+        description: Build, package and test only; publish nothing
+        type: boolean
+        required: true
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DO_NOT_TRACK: '1'
+
+jobs:
+  release:
+    name: release (${{ inputs.target }}${{ inputs.dry-run && ', dry run' || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Needed to create the tag/release and upload the asset (only when not a dry run).
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Refuse to publish from anything but main
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "Publishing is only allowed from main (this run is on ${{ github.ref }}). Use dry-run on other branches."
+          exit 1
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Read the version from package.json
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "vsix=explainit-$v.vsix" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $v"
+
+      - name: Refuse to re-publish an existing tag
+        if: ${{ !inputs.dry-run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --tags origin "refs/tags/v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "Tag v${{ steps.version.outputs.version }} already exists. Bump package.json version first."
+            exit 1
+          fi
+
+      - name: Lint and type-check
+        run: |
+          npm run lint
+          npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build
+        run: npm run build
+
+      - name: Package the VSIX
+        run: npm run package
+
+      - name: Check the VSIX exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${{ steps.version.outputs.vsix }}" || { echo "Expected ${{ steps.version.outputs.vsix }} in the repo root"; ls -la *.vsix || true; exit 1; }
+          ls -la "${{ steps.version.outputs.vsix }}"
+
+      - name: Upload the VSIX as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.vsix }}
+          path: ${{ steps.version.outputs.vsix }}
+          if-no-files-found: error
+
+      - name: Publish to the VS Code Marketplace
+        if: ${{ !inputs.dry-run && (inputs.target == 'marketplace' || inputs.target == 'both') }}
+        env:
+          # vsce reads the token from VSCE_PAT; it never appears on the command line or in logs.
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then echo "The VSCE_PAT secret is not set."; exit 1; fi
+          npx vsce publish --no-dependencies --packagePath "${{ steps.version.outputs.vsix }}"
+
+      - name: Publish to Open VSX
+        if: ${{ !inputs.dry-run && (inputs.target == 'openvsx' || inputs.target == 'both') }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then echo "The OVSX_PAT secret is not set."; exit 1; fi
+          npx ovsx publish "${{ steps.version.outputs.vsix }}"
+
+      - name: Create the GitHub release v${{ steps.version.outputs.version }} with the VSIX attached
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "v${{ steps.version.outputs.version }}" "${{ steps.version.outputs.vsix }}" \
+            --target "${{ github.sha }}" \
+            --title "ExplainIT v${{ steps.version.outputs.version }}" \
+            --generate-notes
+
+      - name: Dry run summary
+        if: ${{ inputs.dry-run }}
+        run: |
+          echo "Dry run: built and packaged ${{ steps.version.outputs.vsix }}; nothing was published."
+          echo "Re-run with dry-run unchecked to publish to ${{ inputs.target }} and create the v${{ steps.version.outputs.version }} release."

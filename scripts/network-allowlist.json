@@ -1,0 +1,23 @@
+{
+  "$comment": "Read by scripts/check-no-network.js. urlPrefixes: URLs that may appear as strings in code because they are shown to the person as links (onboarding install links, the repo) or are JSON-schema identifiers bundled with ajv; none of them is ever fetched. files: repo-relative code files allowed to import a network module (none today; the gate and the hook use only http on 127.0.0.1). knownBenign: specific findings inside bundled dependencies that cannot run in the extension host; every entry needs a reason.",
+  "urlPrefixes": [
+    "https://code.claude.com/",
+    "https://developers.openai.com/",
+    "https://code.visualstudio.com/",
+    "https://github.com/Baharul0111/explainit",
+    "https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit",
+    "https://open-vsx.org/extension/BaharulIslam/explainit",
+    "http://json-schema.org/",
+    "https://json-schema.org/",
+    "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/"
+  ],
+  "files": [],
+  "knownBenign": [
+    {
+      "file": "dist/extension.js",
+      "kind": "api",
+      "contains": "new XMLHttpRequest()",
+      "reason": "Emscripten loader bundled from @vscode/tree-sitter-wasm: the XHR branches only run under ENVIRONMENT_IS_WEB / ENVIRONMENT_IS_WORKER, never in the Node extension host, and the extension passes the wasm bytes itself."
+    }
+  ]
+}
