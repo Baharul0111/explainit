@@ -154,7 +154,7 @@ suite('gate (integration)', function () {
   }
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
     assert.ok(ext, 'extension not found');
     api = (await ext.activate()) as ExplainitApi;
     workspace = vscode.workspace.workspaceFolders![0].uri.fsPath;

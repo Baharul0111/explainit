@@ -32,6 +32,10 @@ This file is updated with every verification run. Commands are exact; counts com
 14. Fast, three OSes, packaged, honest description -> cached-open budget test (`test/integration/twin/twin.test.ts`), streaming provisional twin, CI matrix, `npm run package` + `scripts/check-vsix.js`, README "what is sent where".
 15. Claude Code and Codex VS Code extensions -> detection of bundled binaries (`src/adapters/pure/extensionDirs.ts`), CLI resolver falls back to them (`src/generation/channels/cli.ts`), same user-layer hooks arm both (`test/conformance/real-agents.test.ts` bundled-binary scenarios), Doctor covers both paths.
 
+## Publication
+
+Published 2026-09-03 to the VS Code Marketplace as `BaharulIslam.explainit-code` v0.1.0 (display name "ExplainIT: Plain-English Twins & AI Checkpoint"; the identifier and display name `explainit` were already taken by another publisher). Listing: https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit-code
+
 ## Manual step that remains with Baharul
 
 Publishing to the Marketplace and Open VSX (`scripts/release-checklist.md`, `.github/workflows/release.yml`) waits for the explicit go-ahead.

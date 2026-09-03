@@ -1,5 +1,7 @@
 # ExplainIT
 
+[Install from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit-code) (extension id `BaharulIslam.explainit-code`; search for "ExplainIT" in the Extensions view).
+
 **A plain-English twin for every code file, and a human checkpoint in front of every change your AI coding assistant makes.** Local only. Uses the assistants you already have. Ships no model, holds no keys, runs no server, sends no telemetry.
 
 ExplainIT does two things and does them completely:

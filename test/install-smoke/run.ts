@@ -1,7 +1,7 @@
 /**
  * Fresh-install smoke test (goal.md: "installs from its package into a fresh copy of VS Code").
  *
- *  1. Find the newest explainit-*.vsix in the repo root (fail clearly if none).
+ *  1. Find the newest explainit-code-*.vsix in the repo root (fail clearly if none).
  *  2. Download VS Code with @vscode/test-electron (cached in .vscode-test).
  *  3. Install the VSIX into a brand-new user-data-dir + extensions-dir and check it is listed.
  *  4. Launch VS Code with test/install-smoke/probe as the development extension. The probe waits

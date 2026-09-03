@@ -35,7 +35,7 @@ suite('generation router (integration)', function () {
   let logFile: string;
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
     assert.ok(ext, 'extension present');
     api = await ext!.activate();
     const cfg = vscode.workspace.getConfiguration(CONFIG);

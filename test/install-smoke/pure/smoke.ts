@@ -5,7 +5,7 @@
  */
 import * as path from 'node:path';
 
-export const EXTENSION_ID = 'BaharulIslam.explainit';
+export const EXTENSION_ID = 'BaharulIslam.explainit-code';
 /** Commands the probe must find registered after ExplainIT activates. */
 export const REQUIRED_COMMANDS = ['explainit.openTwin', 'explainit.doctor', 'explainit.pauseCheckpoint'];
 /**
@@ -41,9 +41,9 @@ export interface VsixCandidate {
   mtimeMs: number;
 }
 
-const VSIX_RE = /^explainit-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.vsix$/i;
+const VSIX_RE = /^explainit-code-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.vsix$/i;
 
-/** "explainit-0.1.0.vsix" -> "0.1.0"; anything else -> undefined. */
+/** "explainit-code-0.1.0.vsix" -> "0.1.0"; anything else -> undefined. */
 export function versionFromVsixName(name: string): string | undefined {
   const m = VSIX_RE.exec(name);
   return m ? m[1] : undefined;
@@ -65,7 +65,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Newest explainit-*.vsix by modification time (a rebuilt package must win over an older, higher
+ * Newest explainit-code-*.vsix by modification time (a rebuilt package must win over an older, higher
  * version number left behind); the version number breaks ties. Non-matching names are ignored.
  */
 export function pickNewestVsix(candidates: VsixCandidate[]): VsixCandidate | undefined {
@@ -78,7 +78,7 @@ export function pickNewestVsix(candidates: VsixCandidate[]): VsixCandidate | und
 }
 
 export function noVsixMessage(dir: string): string {
-  return `No explainit-*.vsix found in ${dir}. Run "npm run package" first, then run this smoke test again.`;
+  return `No explainit-code-*.vsix found in ${dir}. Run "npm run package" first, then run this smoke test again.`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -620,7 +620,7 @@ export const USAGE = `ExplainIT fresh-install smoke test
 
   node out/test/install-smoke/run.js [--vsix <file>] [--version stable|insiders|1.100.0] [--timeout <seconds>] [--keep]
 
-Downloads VS Code (cached in .vscode-test), installs the newest explainit-*.vsix from the repo root
+Downloads VS Code (cached in .vscode-test), installs the newest explainit-code-*.vsix from the repo root
 into a throw-away profile, checks it is listed, then launches VS Code with a tiny probe extension
 that drives ExplainIT end to end (activate, commands, open app.py, twin written by the fake
 assistant, .git/info/exclude, then installs the Claude Code hook and runs it against the checkpoint:

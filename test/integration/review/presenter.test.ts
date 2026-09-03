@@ -87,7 +87,7 @@ suite('review presenter (integration)', function () {
   let api: ExplainitApi;
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
     assert.ok(ext, 'extension must be installed');
     api = await ext.activate();
     assert.ok(api.review, 'api.review must be exposed');

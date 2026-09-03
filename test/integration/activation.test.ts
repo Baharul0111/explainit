@@ -6,7 +6,7 @@ import { HOME_LAYOUT } from '../../src/core/paths';
 suite('extension activation', () => {
   test('activates, exports the api, and the gate is listening with a session file', async function () {
     this.timeout(60000);
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
     assert.ok(ext, 'extension not found');
     const api = await ext!.activate();
     assert.ok(api.gate && api.twin && api.router && api.structure && api.adapters && api.ux, 'api incomplete');
@@ -23,7 +23,7 @@ suite('extension activation', () => {
   });
 
   test('every contributed command is registered', async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit')!;
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code')!;
     await ext.activate();
     const declared: string[] = (ext.packageJSON.contributes.commands as { command: string }[]).map((c) => c.command);
     const all = new Set(await vscode.commands.getCommands(true));

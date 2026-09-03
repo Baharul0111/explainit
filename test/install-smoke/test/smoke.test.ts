@@ -44,39 +44,39 @@ import {
 } from '../pure/smoke';
 
 suite('install-smoke/pure/smoke: VSIX discovery', () => {
-  test('versionFromVsixName parses explainit-<semver>.vsix only', () => {
-    assert.equal(versionFromVsixName('explainit-0.1.0.vsix'), '0.1.0');
-    assert.equal(versionFromVsixName('explainit-1.2.3-beta.1.vsix'), '1.2.3-beta.1');
-    assert.equal(versionFromVsixName('EXPLAINIT-0.1.0.VSIX'), '0.1.0');
+  test('versionFromVsixName parses explainit-code-<semver>.vsix only', () => {
+    assert.equal(versionFromVsixName('explainit-code-0.1.0.vsix'), '0.1.0');
+    assert.equal(versionFromVsixName('explainit-code-1.2.3-beta.1.vsix'), '1.2.3-beta.1');
+    assert.equal(versionFromVsixName('EXPLAINIT-CODE-0.1.0.VSIX'), '0.1.0');
     assert.equal(versionFromVsixName('other-0.1.0.vsix'), undefined);
     assert.equal(versionFromVsixName('explainit.vsix'), undefined);
-    assert.equal(versionFromVsixName('explainit-0.1.0.vsix.bak'), undefined);
+    assert.equal(versionFromVsixName('explainit-code-0.1.0.vsix.bak'), undefined);
   });
 
   test('pickNewestVsix prefers the most recently written package', () => {
     const picked = pickNewestVsix([
-      { name: 'explainit-0.2.0.vsix', mtimeMs: 100 },
-      { name: 'explainit-0.1.0.vsix', mtimeMs: 200 },
+      { name: 'explainit-code-0.2.0.vsix', mtimeMs: 100 },
+      { name: 'explainit-code-0.1.0.vsix', mtimeMs: 200 },
       { name: 'README.md', mtimeMs: 999 },
     ]);
-    assert.equal(picked?.name, 'explainit-0.1.0.vsix');
+    assert.equal(picked?.name, 'explainit-code-0.1.0.vsix');
   });
 
   test('pickNewestVsix breaks mtime ties by version and ignores non-matching names', () => {
     const picked = pickNewestVsix([
-      { name: 'explainit-0.1.0.vsix', mtimeMs: 100 },
-      { name: 'explainit-0.1.10.vsix', mtimeMs: 100 },
-      { name: 'explainit-0.1.9.vsix', mtimeMs: 100 },
+      { name: 'explainit-code-0.1.0.vsix', mtimeMs: 100 },
+      { name: 'explainit-code-0.1.10.vsix', mtimeMs: 100 },
+      { name: 'explainit-code-0.1.9.vsix', mtimeMs: 100 },
       { name: 'notes.txt', mtimeMs: 100 },
     ]);
-    assert.equal(picked?.name, 'explainit-0.1.10.vsix');
+    assert.equal(picked?.name, 'explainit-code-0.1.10.vsix');
     assert.equal(pickNewestVsix([]), undefined);
     assert.equal(pickNewestVsix([{ name: 'foo.vsix', mtimeMs: 1 }]), undefined);
   });
 
   test('noVsixMessage tells the person what to do next', () => {
     const msg = noVsixMessage('/repo');
-    assert.match(msg, /No explainit-\*\.vsix found in \/repo/);
+    assert.match(msg, /No explainit-code-\*\.vsix found in \/repo/);
     assert.match(msg, /npm run package/);
   });
 });
@@ -121,7 +121,7 @@ suite('install-smoke/pure/smoke: VS Code CLI invocation', () => {
   });
 
   test('install and list arguments are complete and ordered', () => {
-    assert.deepEqual(installArgs('/r/explainit-0.1.0.vsix', '/ud', '/ed'), ['--install-extension', '/r/explainit-0.1.0.vsix', '--user-data-dir', '/ud', '--extensions-dir', '/ed', '--force']);
+    assert.deepEqual(installArgs('/r/explainit-code-0.1.0.vsix', '/ud', '/ed'), ['--install-extension', '/r/explainit-code-0.1.0.vsix', '--user-data-dir', '/ud', '--extensions-dir', '/ed', '--force']);
     const list = listArgs('/ud', '/ed');
     assert.ok(list.includes('--list-extensions'));
     assert.ok(list.includes('--show-versions'));
@@ -129,9 +129,9 @@ suite('install-smoke/pure/smoke: VS Code CLI invocation', () => {
   });
 
   test('parseListExtensions keeps only extension ids, lower-cased, with versions', () => {
-    const out = parseListExtensions('Extensions installed on ...\r\nBaharulIslam.explainit@0.1.0\nms-python.python@2026.1.0\n\n[main 12:00] some log line\nvscode.git\n');
+    const out = parseListExtensions('Extensions installed on ...\r\nBaharulIslam.explainit-code@0.1.0\nms-python.python@2026.1.0\n\n[main 12:00] some log line\nvscode.git\n');
     assert.deepEqual(out, [
-      { id: 'baharulislam.explainit', version: '0.1.0' },
+      { id: 'baharulislam.explainit-code', version: '0.1.0' },
       { id: 'ms-python.python', version: '2026.1.0' },
       { id: 'vscode.git', version: undefined },
     ]);
@@ -240,7 +240,7 @@ suite('install-smoke/pure/smoke: probe result and report', () => {
   test('Report renders PASS when every check passed', () => {
     const r = new Report();
     assert.equal(r.ok, false, 'an empty report is not a pass');
-    r.check('VSIX present', true, 'explainit-0.1.0.vsix', 12);
+    r.check('VSIX present', true, 'explainit-code-0.1.0.vsix', 12);
     r.check('installs', true, undefined, 2500);
     r.note('git init');
     const text = r.render();
@@ -283,10 +283,10 @@ suite('install-smoke/pure/smoke: arguments', () => {
   });
 
   test('flags and environment', () => {
-    const a = parseArgs(['--keep', '--version', 'insiders', '--vsix=/x/explainit-0.1.0.vsix', '--timeout', '30'], {});
+    const a = parseArgs(['--keep', '--version', 'insiders', '--vsix=/x/explainit-code-0.1.0.vsix', '--timeout', '30'], {});
     assert.equal(a.keep, true);
     assert.equal(a.version, 'insiders');
-    assert.equal(a.vsix, '/x/explainit-0.1.0.vsix');
+    assert.equal(a.vsix, '/x/explainit-code-0.1.0.vsix');
     assert.equal(a.timeoutMs, 30000);
     const b = parseArgs(['--version=1.100.0', '--timeout=2.5'], { EXPLAINIT_SMOKE_KEEP: '1' });
     assert.equal(b.version, '1.100.0');

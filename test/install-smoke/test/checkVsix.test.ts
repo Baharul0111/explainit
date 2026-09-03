@@ -177,7 +177,7 @@ suite('scripts/check-vsix: content checks', () => {
       'extension/.env.local',
       'extension/.vscode-test-download.log',
       'extension/.workflows/build2.js',
-      'extension/explainit-0.0.9.vsix',
+      'extension/explainit-code-0.0.9.vsix',
       'extension/tsconfig.json',
     ];
     const r = checker.checkEntries(entries([...GOOD, ...stray]));
@@ -192,7 +192,7 @@ suite('scripts/check-vsix: content checks', () => {
     assert.match(text, /extension\/\.env\.local must not ship/);
     assert.match(text, /extension\/\.vscode-test-download\.log must not ship/);
     assert.match(text, /extension\/\.workflows\/ must not ship/);
-    assert.match(text, /extension\/explainit-0\.0\.9\.vsix must not ship/);
+    assert.match(text, /extension\/explainit-code-0\.0\.9\.vsix must not ship/);
     assert.match(text, /extension\/tsconfig\.json must not ship/);
     assert.equal(r.problems.filter((p) => /out-ux-verify/.test(p)).length, 1, 'one line per stray folder');
     assert.equal(r.problems.filter((p) => /\.vsix/.test(p)).length, 1);
@@ -247,18 +247,18 @@ suite('scripts/check-vsix: driver', () => {
     assert.throws(() => checker.parseCliArgs(['a.vsix', 'b.vsix']), /Only one/);
   });
 
-  test('pickNewestVsix picks the most recently written explainit-*.vsix and ignores the rest', () => {
-    fs.writeFileSync(path.join(dir, 'explainit-0.1.0.vsix'), 'old');
+  test('pickNewestVsix picks the most recently written explainit-code-*.vsix and ignores the rest', () => {
+    fs.writeFileSync(path.join(dir, 'explainit-code-0.1.0.vsix'), 'old');
     fs.writeFileSync(path.join(dir, 'other.vsix'), 'x');
-    fs.writeFileSync(path.join(dir, 'explainit-0.2.0.vsix'), 'new');
+    fs.writeFileSync(path.join(dir, 'explainit-code-0.2.0.vsix'), 'new');
     const past = new Date(Date.now() - 60_000);
-    fs.utimesSync(path.join(dir, 'explainit-0.1.0.vsix'), past, past);
-    assert.equal(path.basename(checker.pickNewestVsix(dir)!), 'explainit-0.2.0.vsix');
+    fs.utimesSync(path.join(dir, 'explainit-code-0.1.0.vsix'), past, past);
+    assert.equal(path.basename(checker.pickNewestVsix(dir)!), 'explainit-code-0.2.0.vsix');
     assert.equal(checker.pickNewestVsix(os.tmpdir() + path.sep + 'explainit-none-' + process.pid), undefined, 'a missing dir is not a crash');
   });
 
   test('a real zip written to disk round-trips through the checker', () => {
-    const file = path.join(dir, 'explainit-9.9.9.vsix');
+    const file = path.join(dir, 'explainit-code-9.9.9.vsix');
     fs.writeFileSync(file, makeZip(GOOD.map((name) => ({ name, data: 'content' }))));
     const r = checker.checkEntries(checker.listZipEntries(fs.readFileSync(file)));
     assert.equal(r.ok, true, r.problems.join('\n'));

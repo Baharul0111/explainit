@@ -266,7 +266,7 @@ dialogs that block (auto-answer using `EXPLAINIT_TEST_ANSWERS` JSON env if prese
 ## Integration test access
 
 `src/extension.ts` returns an `ExplainitApi` object from `activate()`; integration tests get it via
-`await vscode.extensions.getExtension('BaharulIslam.explainit')!.activate()` — it exposes every module instance
+`await vscode.extensions.getExtension('BaharulIslam.explainit-code')!.activate()` — it exposes every module instance
 (`gate`, `twin`, `router`, `structure`, `adapters`, `ux`, `kits()`, `review`, `memory`, `instructions`, `copilot`,
 `state`, `settings`). `src/core/landing.ts` (`recordLanding` / `landedRecently`) is how the gate tells the Copilot
 watcher and twin staleness logic that a write was gate-approved.

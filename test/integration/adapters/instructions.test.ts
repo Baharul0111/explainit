@@ -15,7 +15,7 @@ suite('instructions (integration)', function () {
   let dir: string;
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension('BaharulIslam.explainit')!.activate()) as Api;
+    api = (await vscode.extensions.getExtension('BaharulIslam.explainit-code')!.activate()) as Api;
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'explainit-instr-int-'));
   });
   suiteTeardown(() => {

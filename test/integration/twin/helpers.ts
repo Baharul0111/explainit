@@ -12,7 +12,7 @@ import type { Explanation } from '../../../src/core/types';
 import type { ExplainitApi } from '../../../src/extension';
 
 export async function getApi(): Promise<ExplainitApi> {
-  const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+  const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
   assert.ok(ext, 'extension not found');
   return (await ext!.activate()) as ExplainitApi;
 }

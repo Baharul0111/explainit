@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 suite('eval baseline lock (live extension)', () => {
   test('the running extension uses exactly the prompts the eval baseline was recorded with', async function () {
     this.timeout(60000);
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit')!;
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code')!;
     const api = await ext.activate();
     const baselinePath = path.join(ext.extensionPath, 'eval', 'baseline.json');
     assert.ok(fs.existsSync(baselinePath), `missing ${baselinePath}`);

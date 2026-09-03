@@ -12,8 +12,8 @@ import { MESSAGES } from '../../../src/ux/pure/messages';
 import { RUNBOOKS, runbookPath } from '../../../src/ux/runbooks';
 
 function extension(): vscode.Extension<unknown> {
-  const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
-  assert.ok(ext, 'extension BaharulIslam.explainit must be installed in the test host');
+  const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
+  assert.ok(ext, 'extension BaharulIslam.explainit-code must be installed in the test host');
   return ext;
 }
 

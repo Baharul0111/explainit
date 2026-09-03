@@ -19,7 +19,7 @@ suite('adapters (integration)', function () {
   let api: Api;
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
     assert.ok(ext, 'extension present');
     api = (await ext.activate()) as Api;
   });

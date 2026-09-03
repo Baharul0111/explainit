@@ -126,7 +126,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: explainit-vsix
-          path: explainit-*.vsix
+          path: explainit-code-*.vsix
           if-no-files-found: error
           retention-days: 30
 

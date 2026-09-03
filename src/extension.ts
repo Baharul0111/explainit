@@ -150,7 +150,7 @@ export async function deactivate(): Promise<void> {
   logger?.info('deactivating');
 }
 
-/** Exposed for integration tests (vscode.extensions.getExtension('BaharulIslam.explainit').exports). */
+/** Exposed for integration tests (vscode.extensions.getExtension('BaharulIslam.explainit-code').exports). */
 export interface ExplainitApi {
   gate: ReturnType<typeof createGateServer>;
   twin: ReturnType<typeof createTwinEngine>;

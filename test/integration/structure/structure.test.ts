@@ -37,8 +37,8 @@ suite('structure engine (integration)', function () {
   let extensionPath: string;
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension('BaharulIslam.explainit');
-    assert.ok(ext, 'extension BaharulIslam.explainit should be installed in the test host');
+    const ext = vscode.extensions.getExtension('BaharulIslam.explainit-code');
+    assert.ok(ext, 'extension BaharulIslam.explainit-code should be installed in the test host');
     api = (await ext!.activate()) as Api;
     extensionPath = ext!.extensionPath;
     assert.ok(api.structure, 'activate() should expose the structure engine');

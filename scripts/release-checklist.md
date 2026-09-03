@@ -47,7 +47,7 @@ npx vsce publish --no-dependencies --packagePath explainit-<version>.vsix
 ```
 
 Or, from the same workflow: `target = marketplace`, `dry-run = false` (uses the `VSCE_PAT` secret).
-Check https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit shows the new version
+Check https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit-code shows the new version
 (it can take a few minutes to verify).
 
 ## 4. Publish to Open VSX (Cursor, VSCodium, Gitpod)

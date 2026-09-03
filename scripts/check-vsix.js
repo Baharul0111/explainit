@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Checks that a packaged explainit-<version>.vsix contains what ships and nothing else
+ * Checks that a packaged explainit-code-<version>.vsix contains what ships and nothing else
  * (goal item 14 "packaged and ready to publish"). `vsce package` happily bundles whatever is in the
  * working tree that .vscodeignore does not exclude: scratch build folders (out-*), tests, sources,
  * a stray .env. Publishing that is embarrassing at best and leaks private files at worst.
@@ -14,7 +14,7 @@
  *
  * Exit 0 when clean, 1 with the list of problems and what to do next, 2 on usage errors.
  *   node scripts/check-vsix.js [<file.vsix>] [--max-files <n>] [--max-mb <n>] [--json]
- * Without a file argument the newest explainit-*.vsix in the current directory is checked.
+ * Without a file argument the newest explainit-code-*.vsix in the current directory is checked.
  */
 'use strict';
 const fs = require('fs');
@@ -126,7 +126,7 @@ function checkEntries(entries, opts) {
   return { ok: problems.length === 0, problems, files, totalBytes };
 }
 
-/** Newest explainit-*.vsix in `dir` by modification time; undefined when there is none (or no such directory). */
+/** Newest explainit-code-*.vsix in `dir` by modification time; undefined when there is none (or no such directory). */
 function pickNewestVsix(dir) {
   let best;
   let names;
@@ -136,7 +136,7 @@ function pickNewestVsix(dir) {
     return undefined;
   }
   for (const name of names) {
-    if (!/^explainit-.+\.vsix$/i.test(name)) continue;
+    if (!/^explainit-code-.+\.vsix$/i.test(name)) continue;
     let st;
     try {
       st = fs.statSync(path.join(dir, name));
@@ -185,7 +185,7 @@ function main(argv) {
   }
   const file = opts.file ? path.resolve(opts.file) : pickNewestVsix(process.cwd());
   if (!file) {
-    console.error(`check-vsix: no explainit-*.vsix in ${process.cwd()}. Run "npm run package" first.`);
+    console.error(`check-vsix: no explainit-code-*.vsix in ${process.cwd()}. Run "npm run package" first.`);
     return 2;
   }
   let entries;

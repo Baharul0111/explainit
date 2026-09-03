@@ -15,10 +15,10 @@ On Linux without a display: `xvfb-run -a npm run test:install` (CI does this).
 
 What it does, in order:
 
-1. Finds the newest `explainit-*.vsix` in the repo root (fails with "run npm run package first" if none).
+1. Finds the newest `explainit-code-*.vsix` in the repo root (fails with "run npm run package first" if none).
 2. Downloads VS Code with `@vscode/test-electron` into `.vscode-test` (reused across runs).
 3. Installs the VSIX into a brand-new `--user-data-dir` / `--extensions-dir` under the OS temp folder
-   and checks `--list-extensions` shows `BaharulIslam.explainit`.
+   and checks `--list-extensions` shows `BaharulIslam.explainit-code`.
 4. Copies `test/fixtures/workspace` to a temp folder, runs `git init` there, writes a `settings.json`
    that points ExplainIT at the fake Claude CLI (`test/fixtures/fake-cli/claude.js`) and pre-seeds the
    permission grant, then launches VS Code with `probe/` as the development extension.

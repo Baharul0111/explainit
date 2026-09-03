@@ -1,6 +1,6 @@
 // Bundles the extension host code into dist/extension.js and copies runtime assets.
 import * as esbuild from 'esbuild';
-import { cpSync, mkdirSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const watch = process.argv.includes('--watch');
@@ -35,6 +35,7 @@ const ctx = await esbuild.context({
 });
 
 copyAssets();
+if (production) { try { rmSync(join('dist', 'extension.js.map'), { force: true }); } catch { /* no stale source map */ } }
 if (watch) {
   await ctx.watch();
 } else {

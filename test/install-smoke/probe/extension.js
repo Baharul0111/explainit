@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const EXTENSION_ID = 'BaharulIslam.explainit';
+const EXTENSION_ID = 'BaharulIslam.explainit-code';
 const REQUIRED_COMMANDS = ['explainit.openTwin', 'explainit.doctor', 'explainit.pauseCheckpoint'];
 const resultFile = process.env.EXPLAINIT_SMOKE_RESULT || '';
 const workspaceDir = process.env.EXPLAINIT_SMOKE_WORKSPACE || '';

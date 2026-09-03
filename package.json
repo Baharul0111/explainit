@@ -1,6 +1,6 @@
 {
-  "name": "explainit",
-  "displayName": "ExplainIT",
+  "name": "explainit-code",
+  "displayName": "ExplainIT: Plain-English Twins & AI Checkpoint",
   "description": "A plain-English twin for every code file, and a human checkpoint in front of every change your AI coding assistant makes. Local only. Uses the assistants you already have.",
   "version": "0.1.0",
   "publisher": "BaharulIslam",
