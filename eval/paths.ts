@@ -15,7 +15,7 @@ export function repoRoot(): string {
     const pkg = path.join(dir, 'package.json');
     try {
       const parsed = JSON.parse(fs.readFileSync(pkg, 'utf8')) as { name?: string };
-      if (parsed.name === 'explainit') {
+      if ((parsed.name === 'explainit' || parsed.name === 'explainit-code')) {
         cachedRoot = dir;
         return dir;
       }
