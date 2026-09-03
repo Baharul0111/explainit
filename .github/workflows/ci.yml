@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload ExplainIT logs and the integration output when the integration tests fail
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: explainit-logs-${{ matrix.os }}
           path: |
@@ -123,7 +123,7 @@ jobs:
 
       - name: Upload the VSIX
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: explainit-vsix
           path: explainit-code-*.vsix
