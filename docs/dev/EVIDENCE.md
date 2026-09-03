@@ -36,6 +36,8 @@ This file is updated with every verification run. Commands are exact; counts com
 
 Published 2026-09-03 to the VS Code Marketplace as `BaharulIslam.explainit-code` v0.1.0 (display name "ExplainIT: Plain-English Twins & AI Checkpoint"; the identifier and display name `explainit` were already taken by another publisher). Listing: https://marketplace.visualstudio.com/items?itemName=BaharulIslam.explainit-code
 
+Verified 2026-09-03 21:16 IST: the public gallery query for "ExplainIT" lists `BaharulIslam.explainit-code`, and a fresh VS Code profile installed it from the Marketplace (`--install-extension BaharulIslam.explainit-code` -> `baharulislam.explainit-code@0.1.0`).
+
 ## Manual step that remains with Baharul
 
 Publishing to the Marketplace and Open VSX (`scripts/release-checklist.md`, `.github/workflows/release.yml`) waits for the explicit go-ahead.
