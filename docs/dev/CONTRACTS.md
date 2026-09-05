@@ -313,3 +313,18 @@ watcher and twin staleness logic that a write was gate-approved.
   with a try-again reason unless the person chose passthrough. Claude Code keeps `ask`.
 - Pinned user-layer config edits (Claude settings, Codex hooks.json/config.toml) whose outcome cannot be replayed onto the
   current file (old_string absent, apply_patch delete) are denied by the hook mirror; the gate sees them only after that.
+
+## 0.2.0 seams (2026-09-04)
+
+- `ProjectConsent` (src/core/projectConsent.ts, state.projects): once-per-project permission. The twin engine's
+  `projectGate` (src/twin/projectPermission.ts) asks on the first eligible file, remembers the answer, and blocks
+  auto-open, ensureTwin, updateAfterChange, markStale and backfill for refused projects. The gate/checkpoint never
+  consults it. Test mode auto-answers from EXPLAINIT_TEST_ANSWERS.projectPermission (default "Explain this project").
+- `AdapterManager.ensureArmed()` (pure orchestration in src/adapters/arm.ts): after consent, install the hook for every
+  Claude Code / Codex detected. Called at every activation and from onboarding; the status bar shows 'unarmed' when an
+  assistant is present but not armed and offers "Arm the checkpoint now".
+- Twins register as the `explainit-twin` language (package.json contributes.languages + configurationDefaults) so
+  VS Code wraps their lines; `explainit-twin` is in the twin engine's non-code list.
+- `InstructionsGenerator.ensure()` also returns `excluded`: files ExplainIT created are added to the repository's local
+  exclude list (`src/core/gitExclude.ts` `ensureFileExcluded`); files that already existed are never touched. Instruction
+  files and the twin exclude pattern are written only for projects the person allowed.

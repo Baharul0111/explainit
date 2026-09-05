@@ -12,6 +12,7 @@ import type {
   GateServer,
   GenerationRouter,
   InstructionsGenerator,
+  ProjectConsent,
   ReviewPresenter,
   SafetyKit,
   StructureEngine,
@@ -34,5 +35,7 @@ export interface UxDeps extends CoreDeps {
   copilot: CopilotWatcher;
   instructions: InstructionsGenerator;
   consent: ConsentStore;
+  /** Per-project permission store (ask once per project before explaining anything there). */
+  projectConsent: ProjectConsent;
   disposables: Disposable[];
 }

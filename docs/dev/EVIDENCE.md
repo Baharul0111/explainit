@@ -38,6 +38,17 @@ Published 2026-09-03 to the VS Code Marketplace as `BaharulIslam.explainit-code`
 
 Verified 2026-09-03 21:16 IST: the public gallery query for "ExplainIT" lists `BaharulIslam.explainit-code`, and a fresh VS Code profile installed it from the Marketplace (`--install-extension BaharulIslam.explainit-code` -> `baharulislam.explainit-code@0.1.0`).
 
+## 0.2.0 (2026-09-05): four fixes from first real use
+
+| Change | Proof |
+|---|---|
+| Twins wrap instead of scrolling sideways | `package.json` registers `explainit-twin` for `*_explain.txt` with `editor.wordWrap: on`; the scroll-sync suite (sticky scroll on and off) passes with the new defaults |
+| Ask once per project before explaining | `test/unit/core/projectConsent.test.ts`; `test/integration/twin/projectPermission.test.ts` (refused project gets no twin on open nor on request; allowed project does; an undecided project is asked once and remembered; the command flips it; the `always` setting skips the question) |
+| Checkpoint armed automatically on a fresh machine | `src/adapters/arm.ts` + `test/unit/adapters/ensureArmed.test.ts` (no consent: nothing; consent: every assistant found is armed into a temp user home, second call finds it armed); status bar `unarmed` state in `test/unit/ux/statusUnarmed.test.ts`; called at every activation and from onboarding |
+| Instruction files ExplainIT creates stay out of git | `test/unit/core/gitExcludeFile.test.ts`, `test/unit/instructions/exclude.test.ts` (created files excluded locally, team files untouched, setting turns it off) |
+
+Local runs on 2026-09-05: 1084 unit, 36 hook conformance, 103 VS Code integration, install smoke PASS (26 checks) against `explainit-code-0.2.0.vsix`.
+
 ## Manual step that remains with Baharul
 
 Publishing to the Marketplace and Open VSX (`scripts/release-checklist.md`, `.github/workflows/release.yml`) waits for the explicit go-ahead.

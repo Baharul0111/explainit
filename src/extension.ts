@@ -8,6 +8,7 @@ import type { Disposable, SafetyKit } from './core/interfaces';
 import { createLogger, FileSink, defaultLogFile, type Logger } from './core/log';
 import { vscodeSettings } from './core/settingsVscode';
 import { createStateStore } from './core/state';
+import { createProjectConsent } from './core/projectConsent';
 import { HOME_LAYOUT, canonicalPath, ensureDir, isInside } from './core/paths';
 import { createStructureEngine } from './structure';
 import { createGenerationRouter, createFileCache, createConsentStore } from './generation';
@@ -55,6 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
   disposables.push(vscode.workspace.onDidChangeWorkspaceFolders(() => workspaceFolders().forEach(kitFor)));
 
   const consent = createConsentStore(state);
+  const projectConsent = createProjectConsent(state);
   const cacheFile = path.join(HOME_LAYOUT.workspace(workspaceFolders()[0] ?? context.globalStorageUri.fsPath), 'cache.json');
   const cache = createFileCache(cacheFile);
   disposables.push({ dispose: () => void cache.flush() });
@@ -63,11 +65,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
   const structure = createStructureEngine({ ...core, router: () => routerBox.router, disposables });
   const router = createGenerationRouter({ ...core, cache, consent, disposables });
   routerBox.router = router;
-  const twin = createTwinEngine({ ...core, structure, router, workspaceFolders, disposables });
+  const twin = createTwinEngine({ ...core, structure, router, workspaceFolders, disposables, projectConsent });
   const review = createReviewPresenter({ ...core, extensionUri: context.extensionUri.toString(), disposables });
   const memory = createDecisionMemory();
   const gateInfoRef: { info?: () => ReturnType<typeof createGateServer>['info'] } = {};
-  const adapters = createAdapterManager({ ...core, state, gateInfo: () => gateInfoRef.info?.(), disposables });
+  const adapters = createAdapterManager({ ...core, state, gateInfo: () => gateInfoRef.info?.(), disposables, consentGranted: () => consent.granted() });
   const gate = createGateServer({
     ...core,
     structure,
@@ -101,6 +103,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
     copilot,
     instructions,
     consent,
+    projectConsent,
     disposables,
   });
   disposables.push(registerJournalView({ ...core, kits: () => [...kits.values()], context }));
@@ -122,8 +125,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
     try {
       // Goal item 8: the checkpoint verifies its own integrity every session and re-arms if tampered.
       await verifyAndRearmAtStartup(adapters, logger.child('startup'));
-      if (settings.get('instructionsAutoUpdate')) for (const f of workspaceFolders()) await instructions.ensure(f);
-      for (const f of workspaceFolders()) await twin.ensureGitExclude(f);
+      // Goal item 7 on every machine: arm the checkpoint for every assistant found, without extra clicks.
+      if (consent.granted()) {
+        const arm = await adapters.ensureArmed();
+        if (arm.armed.length) {
+          logger.info(`checkpoint armed automatically for ${arm.armed.join(', ')}`);
+          void vscode.window.showInformationMessage(`ExplainIT armed the checkpoint for ${arm.armed.join(' and ')}. Start a new conversation in the assistant so it takes effect.${arm.armed.includes('codex') ? ' Codex only runs hooks you trust: open codex once in a terminal and choose Trust when it shows the ExplainIT hook.' : ''}`);
+        }
+        for (const f of arm.failed) logger.warn(`could not arm ${f.agent}: ${f.detail}`);
+      }
+      // Per-project permission: instruction files and the git exclude are written only where the person said yes.
+      const allowed = (f: string): boolean => projectConsent.status(f) === 'allowed' || (projectConsent.status(f) === 'unknown' && settings.get('twinProjectPermission') === 'always');
+      const prepareFolder = async (f: string): Promise<void> => {
+        if (settings.get('instructionsAutoUpdate')) await instructions.ensure(f);
+        await twin.ensureGitExclude(f);
+      };
+      for (const f of workspaceFolders()) if (allowed(f)) await prepareFolder(f);
+      disposables.push(
+        projectConsent.onDidChange((e) => {
+          if (e.decision === 'allowed') prepareFolder(e.folder).catch((err) => core.logger.warn('preparing the allowed project failed', err));
+        }),
+      );
       if (!state.read().onboardingDone) await ux.runOnboarding();
     } catch (e) {
       logger.error('startup tasks failed', e);
@@ -143,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
     },
   });
 
-  return { gate, twin, router, structure, adapters, ux, kits: () => [...kits.values()], review, memory, instructions, copilot, state, settings };
+  return { gate, twin, router, structure, adapters, ux, kits: () => [...kits.values()], review, memory, instructions, copilot, state, settings, projectConsent };
 }
 
 export async function deactivate(): Promise<void> {
@@ -165,4 +187,5 @@ export interface ExplainitApi {
   copilot: ReturnType<typeof createCopilotWatcher>;
   state: ReturnType<typeof createStateStore>;
   settings: ReturnType<typeof vscodeSettings>;
+  projectConsent: ReturnType<typeof createProjectConsent>;
 }

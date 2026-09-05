@@ -25,6 +25,8 @@ export interface SettingsValues {
   checkpointsMaxTotalMB: number;
   copilotWatcher: boolean;
   instructionsAutoUpdate: boolean;
+  instructionsKeepOutOfGit: boolean;
+  twinProjectPermission: 'ask' | 'always';
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   stalenessMarks: boolean;
 }
@@ -50,6 +52,8 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   checkpointsMaxTotalMB: 200,
   copilotWatcher: true,
   instructionsAutoUpdate: true,
+  instructionsKeepOutOfGit: true,
+  twinProjectPermission: 'ask',
   logLevel: 'info',
   stalenessMarks: true,
 };
@@ -76,6 +80,8 @@ export const SETTING_KEYS: Record<keyof SettingsValues, string> = {
   checkpointsMaxTotalMB: 'restorePoints.maxTotalMB',
   copilotWatcher: 'copilot.reviewOverlay',
   instructionsAutoUpdate: 'instructions.autoUpdate',
+  instructionsKeepOutOfGit: 'instructions.keepOutOfGit',
+  twinProjectPermission: 'twin.projectPermission',
   logLevel: 'logLevel',
   stalenessMarks: 'twin.stalenessMarks',
 };

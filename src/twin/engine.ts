@@ -14,6 +14,7 @@ import type { Explanation, FunctionMap, TwinFile } from '../core/types';
 import { chunk } from './pure/backfillState';
 import { addToGitignore, ensureExcludePattern, hasIgnoreLine, sharedGitignorePath, TWIN_IGNORE_PATTERN } from './pure/gitExclude';
 import { isCodeLanguage, languageIdForPath, MAX_TWIN_SOURCE_BYTES } from './pure/languages';
+import { PROJECT_OFF_MESSAGE, type ProjectGate } from './projectPermission';
 import { isTwinPath, sourceNameForTwin, twinPathFrom } from './pure/naming';
 import { isFullyExplained, parseTwin, type ParsedTwin } from './pure/parse';
 import { renderTwin, type SectionContent } from './pure/render';
@@ -27,6 +28,8 @@ export interface TwinEngineDeps extends CoreDeps {
   router: GenerationRouter;
   workspaceFolders: () => string[];
   disposables: Disposable[];
+  /** Per-project permission: nothing is explained in a project the person has not allowed. */
+  projectGate: ProjectGate;
 }
 
 /** What the engine remembers per source file (canonical path) for scroll sync and staleness. */
@@ -130,6 +133,11 @@ export class TwinEngineImpl implements TwinEngine {
 
   constructor(private readonly deps: TwinEngineDeps) {
     this.log = deps.logger.child('twin');
+  }
+
+  /** The per-project permission gate (auto-open and backfill ask through it before generating). */
+  get projectGate(): ProjectGate {
+    return this.deps.projectGate;
   }
 
   // ------------------------------------------------------------------ paths
@@ -272,6 +280,11 @@ export class TwinEngineImpl implements TwinEngine {
       if (!opts.silent) notice('info', reason);
       return undefined;
     }
+    // Per-project permission: an explicit request may ask the person; a silent one never nags.
+    if (!(await this.deps.projectGate.ensureAllowed(doc.fsPath!, { ask: !opts.silent }))) {
+      if (!opts.silent && this.deps.projectGate.status(doc.fsPath!) === 'denied') notice('info', PROJECT_OFF_MESSAGE);
+      return undefined;
+    }
     const res = await this.serialize(doc.fsPath!, () =>
       this.refresh(doc, { mode: opts.force ? { kind: 'all' } : { kind: 'changed' }, open: opts.open ?? true, silent: opts.silent ?? false, token: opts.token, bypassCache: opts.force }),
     );
@@ -279,6 +292,7 @@ export class TwinEngineImpl implements TwinEngine {
   }
 
   async updateAfterChange(sourcePath: string, opts: { token?: CancelToken } = {}): Promise<TwinFile | undefined> {
+    if (this.deps.projectGate.status(sourcePath) !== 'allowed') return undefined;
     const doc = await this.docFor(sourcePath);
     if (!doc || this.ineligibleReason(doc)) return undefined;
     const res = await this.serialize(sourcePath, () => this.refresh(doc, { mode: { kind: 'changed' }, open: false, silent: true, token: opts.token, skipFastPath: true }));
@@ -286,6 +300,7 @@ export class TwinEngineImpl implements TwinEngine {
   }
 
   async markStale(sourcePath: string): Promise<void> {
+    if (this.deps.projectGate.status(sourcePath) !== 'allowed') return;
     const doc = await this.docFor(sourcePath);
     if (!doc || this.ineligibleReason(doc)) return;
     await this.markStaleDoc(doc);

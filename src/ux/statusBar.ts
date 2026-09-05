@@ -20,6 +20,8 @@ export interface StatusBarDeps {
   adapters: AdapterManager;
   logger: Logger;
   disposables: Disposable[];
+  /** Whether the person granted consent; without it, an unarmed assistant is expected, not a warning. */
+  consentGranted?: () => boolean;
   /** Injected for tests. */
   now?: () => number;
   /** How often to re-evaluate (ms). */
@@ -36,6 +38,7 @@ export class StatusBar {
   private channel = 'none';
   private assistants: string[] = [];
   private armedAgents: string[] = [];
+  private unarmedAgents: string[] = [];
   private installedAgents: string[] = [];
   /** The adapters' plain-English notes per agent (for example the Codex trust verdict), for tooltips. */
   private agentNotes: Record<string, string[]> = {};
@@ -72,8 +75,8 @@ export class StatusBar {
     return this.view;
   }
 
-  get facts(): { channel: string; assistants: string[]; armedAgents: string[]; installedAgents: string[]; agentNotes: Record<string, string[]>; pending: number } {
-    return { channel: this.channel, assistants: this.assistants, armedAgents: this.armedAgents, installedAgents: this.installedAgents, agentNotes: this.agentNotes, pending: this.tracker.pending };
+  get facts(): { channel: string; assistants: string[]; armedAgents: string[]; unarmedAgents: string[]; installedAgents: string[]; agentNotes: Record<string, string[]>; pending: number } {
+    return { channel: this.channel, assistants: this.assistants, armedAgents: this.armedAgents, unarmedAgents: this.unarmedAgents, installedAgents: this.installedAgents, agentNotes: this.agentNotes, pending: this.tracker.pending };
   }
 
   private onHeartbeat(hb: { ts: string; pending: number }): void {
@@ -111,6 +114,7 @@ export class StatusBar {
       channel: this.channel,
       assistants: this.assistants,
       armedAgents: this.armedAgents,
+      unarmedAgents: this.unarmedAgents,
     });
   }
 
@@ -159,6 +163,10 @@ export class StatusBar {
       this.assistants = detect.filter((d) => d.present).map((d) => d.agent);
       this.armedAgents = states.filter((s) => s.installed && s.armed).map((s) => s.agent);
       this.installedAgents = states.filter((s) => s.installed).map((s) => s.agent);
+      // A Claude Code / Codex that is present but not armed after consent is the "fresh machine" gap:
+      // the status bar must say so instead of showing a reassuring shield.
+      const consentOk = this.deps.consentGranted ? this.deps.consentGranted() : true;
+      this.unarmedAgents = consentOk ? this.assistants.filter((a) => (a === 'claude' || a === 'codex') && !this.armedAgents.includes(a)) : [];
       this.agentNotes = Object.fromEntries(states.map((s) => [s.agent, (s.notes ?? []).filter((n) => typeof n === 'string' && n.trim())]));
     } catch (e) {
       this.deps.logger.debug('status facts refresh failed', e);

@@ -35,12 +35,15 @@ Whatever the path, every change ExplainIT sees is written to a tamper-evident lo
 1. Install ExplainIT from the Marketplace (or Open VSX for VSCodium and Cursor).
 2. Have at least one assistant installed and signed in: [Claude Code](https://code.claude.com/docs/en/overview) (terminal tool or the VS Code extension), [Codex](https://developers.openai.com/codex) (terminal tool or the VS Code extension), or [GitHub Copilot](https://code.visualstudio.com/docs/copilot/setup).
 3. On first use ExplainIT asks your **permission** to use those assistants. Choose **Allow**. (Run **ExplainIT: Set up assistants** at any time to see this screen again.)
-4. ExplainIT **detects** what you have — Copilot in VS Code, Claude Code, Codex, including the VS Code extensions and the binaries they bundle — and offers a **one-click Connect** for each. Connecting installs the checkpoint hook and tells you the remaining steps: restart the assistant, and for Codex do the **trust step** once.
+4. ExplainIT **detects** what you have — Copilot in VS Code, Claude Code, Codex, including the VS Code extensions and the binaries they bundle — and **arms the checkpoint for every Claude Code and Codex it finds, automatically**, the moment you allow it. No click per assistant: a fresh machine is protected as soon as you say Allow. It then tells you the remaining steps: start a new conversation in the assistant, and for Codex do the **trust step** once. The setup list still offers one-click Connect for anything that was added later. If an assistant is found but not armed, the status bar says **ExplainIT: not armed** and offers **Arm the checkpoint now**.
+5. The first time you open a code file in a project, ExplainIT **asks once per project**: *Explain this project?* Choose **Explain this project** and twins open beside your code there; choose **Not this project** and ExplainIT stays quiet in that project (no twins, no backfill, no instruction files) while the checkpoint still protects it. Change your mind any time with **ExplainIT: Allow or stop explanations for this project**.
 5. **Codex trust step.** Codex only runs hooks you have trusted. Open `codex` once in a terminal; when it shows the ExplainIT hook, choose **Trust** (or type `/hooks` and trust it there). The Codex VS Code extension shares that trust record, so you do this once, not per window. Until then Codex changes are not stopped for review, and the Doctor says so ("Codex trusts the ExplainIT hook").
 6. If nothing is found you get the three install links and a **Check again** button.
 7. Open any code file. The twin opens beside it. Run **ExplainIT: Doctor** whenever you want proof that everything is installed, armed and healthy.
 
 ## The twin format
+
+Twins open with word wrap on, so long sentences fold to the width of the editor instead of running off to the right; make the editor narrower and the text reflows. (The twin files register as the `explainit-twin` language, which is where that default lives; override it under `[explainit-twin]` in your settings if you prefer otherwise.)
 
 ```
 ExplainIT — plain-English twin of app.py
@@ -69,6 +72,7 @@ Only functions that are new or changed are ever sent to an assistant; unchanged 
 | Setting | Default | What it does |
 |---|---|---|
 | `explainit.twin.autoOpen` | `true` | Open the twin beside a code file the moment it opens. |
+| `explainit.twin.projectPermission` | `ask` | `ask` asks once per project before anything is explained there; `always` explains every project without asking. |
 | `explainit.twin.scrollSync` | `true` | Keep the twin scrolled in step with the code. |
 | `explainit.twin.stalenessMarks` | `true` | Mark a twin section as out of date when its function changes. |
 | `explainit.assistant.channel` | `auto` | Which assistant writes explanations: `auto`, `copilot`, `claude` or `codex`. |
@@ -89,6 +93,7 @@ Only functions that are new or changed are ever sent to an assistant; unchanged 
 | `explainit.restorePoints.maxTotalMB` | `200` | Total disk space for restore points per workspace. |
 | `explainit.copilot.reviewOverlay` | `true` | Overlay per-function explanations on Copilot's saved changes. |
 | `explainit.instructions.autoUpdate` | `true` | Keep the ExplainIT sections in `CLAUDE.md`, `AGENTS.md` and `.github/copilot-instructions.md` up to date. |
+| `explainit.instructions.keepOutOfGit` | `true` | When ExplainIT creates one of those files, keep it out of git through the repository's local exclude list. Files your team already had are never touched. |
 | `explainit.logLevel` | `info` | Local log detail. Nothing is ever sent anywhere. |
 
 ## Commands
@@ -101,6 +106,7 @@ All commands live under the **ExplainIT** category in the Command Palette.
 | Regenerate this section | Rewrite the twin section under the cursor. |
 | Regenerate the whole twin for this file | Rewrite every section of the current file's twin. |
 | Turn automatic twin opening on/off | Toggle `explainit.twin.autoOpen`. |
+| Allow or stop explanations for this project | Change the once-per-project decision: explain this project, or leave it alone (the checkpoint keeps protecting it either way). |
 | Backfill the whole project | Explain every code file in the workspace after showing a cost estimate and asking for confirmation; shows progress. |
 | Pause backfill / Resume backfill / Cancel backfill | Control a running backfill. |
 | Pause the checkpoint | Kill switch: assistants use their own prompts; a persistent banner and the status bar say so. |

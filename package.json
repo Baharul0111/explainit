@@ -2,7 +2,7 @@
   "name": "explainit-code",
   "displayName": "ExplainIT: Plain-English Twins & AI Checkpoint",
   "description": "A plain-English twin for every code file, and a human checkpoint in front of every change your AI coding assistant makes. Local only. Uses the assistants you already have.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "BaharulIslam",
   "license": "MIT",
   "author": {
@@ -59,6 +59,26 @@
     }
   },
   "contributes": {
+    "languages": [
+      {
+        "id": "explainit-twin",
+        "aliases": [
+          "ExplainIT twin",
+          "explainit-twin"
+        ],
+        "filenamePatterns": [
+          "*_explain.txt"
+        ]
+      }
+    ],
+    "configurationDefaults": {
+      "[explainit-twin]": {
+        "editor.wordWrap": "on",
+        "editor.wrappingIndent": "indent",
+        "editor.lineNumbers": "on",
+        "editor.stickyScroll.enabled": false
+      }
+    },
     "commands": [
       {
         "command": "explainit.openTwin",
@@ -198,6 +218,11 @@
         "title": "Refresh",
         "category": "ExplainIT",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "explainit.projectPermission",
+        "title": "Allow or stop explanations for this project",
+        "category": "ExplainIT"
       }
     ],
     "configuration": {
@@ -344,6 +369,24 @@
           "type": "boolean",
           "default": true,
           "description": "Keep the ExplainIT sections in CLAUDE.md, AGENTS.md and .github/copilot-instructions.md up to date."
+        },
+        "explainit.instructions.keepOutOfGit": {
+          "type": "boolean",
+          "default": true,
+          "description": "When ExplainIT creates CLAUDE.md, AGENTS.md or .github/copilot-instructions.md, keep them out of git through the repository's local exclude list (files that already existed are never touched)."
+        },
+        "explainit.twin.projectPermission": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "always"
+          ],
+          "default": "ask",
+          "enumDescriptions": [
+            "Ask once for each project before writing any twin or instruction file there.",
+            "Explain every project without asking."
+          ],
+          "description": "Whether ExplainIT asks for permission before explaining a project. Use \"ExplainIT: Allow or stop explanations for this project\" to change a decision later."
         },
         "explainit.logLevel": {
           "type": "string",

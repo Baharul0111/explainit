@@ -48,7 +48,14 @@ export function registerAutoOpen(engine: TwinEngineImpl, deps: { settings: Setti
       setTimeout(() => {
         timers.delete(key);
         if (doc.isClosed) return;
-        engine.ensureTwin(toDocLike(doc), { open: true, silent: true }).catch((e) => log.warn(`auto-open failed for ${doc.uri.fsPath}`, e));
+        // Ask once per project before the first twin is written there; a refused project stays quiet.
+        engine.projectGate
+          .ensureAllowed(doc.uri.fsPath, { ask: true })
+          .then((allowed) => {
+            if (!allowed || doc.isClosed) return undefined;
+            return engine.ensureTwin(toDocLike(doc), { open: true, silent: true });
+          })
+          .catch((e) => log.warn(`auto-open failed for ${doc.uri.fsPath}`, e));
       }, DEBOUNCE_MS),
     );
   };

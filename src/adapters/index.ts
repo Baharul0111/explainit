@@ -4,9 +4,10 @@
  */
 import * as vscode from 'vscode';
 import { withTimeout } from '../core/cancel';
-import type { AdapterManager, CoreDeps, DetectResult, Disposable, GateSessionInfo, InstallResult, IntegrityReport } from '../core/interfaces';
+import type { AdapterManager, ArmResult, CoreDeps, DetectResult, Disposable, GateSessionInfo, InstallResult, IntegrityReport } from '../core/interfaces';
 import type { StateStore } from '../core/state';
 import type { AdapterState, AgentKind } from '../core/types';
+import { ensureArmedWith } from './arm';
 import { ClaudeAdapter } from './claude';
 import { CodexAdapter } from './codex';
 import { detectCopilot } from './copilotDetect';
@@ -35,6 +36,8 @@ export interface AdapterManagerDeps extends CoreDeps {
   state: StateStore;
   gateInfo: () => GateSessionInfo | undefined;
   disposables: Disposable[];
+  /** Whether the person has granted permission to use their assistants; ensureArmed() does nothing without it. */
+  consentGranted?: () => boolean;
   /** Test seam: overrides for the environment (user home, platform, probe). */
   envOverrides?: Partial<AdapterEnv>;
 }
@@ -136,6 +139,10 @@ export function createAdapterManager(deps: AdapterManagerDeps): AdapterManager {
       return out;
     },
     hookScriptPath: () => installedScriptPath(env),
+    // Goal item 7 on a fresh machine: the checkpoint must be armed without an extra click per
+    // assistant, otherwise a person who dismissed the setup list is left unprotected.
+    ensureArmed: (): Promise<ArmResult> =>
+      ensureArmedWith({ agents: [claude, codex], detect: () => manager.detect(), consentGranted: () => (deps.consentGranted ? deps.consentGranted() : true), logger }),
   };
   return manager;
 }

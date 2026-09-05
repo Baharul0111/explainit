@@ -11,6 +11,7 @@ export const MAX_TWIN_SOURCE_BYTES = 2 * 1024 * 1024;
 /** Language ids that hold data or prose, not functions. Dockerfile is deliberately kept as code. */
 export const NON_CODE_LANGUAGES: ReadonlySet<string> = new Set([
   'plaintext',
+  'explainit-twin',
   'markdown',
   'json',
   'jsonc',

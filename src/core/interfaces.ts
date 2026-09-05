@@ -53,6 +53,26 @@ export type Listener<T> = (e: T) => void;
 export type EventLike<T> = (listener: Listener<T>) => Disposable;
 
 // ---------------------------------------------------------------------------------------------
+// Per-project permission (src/core/projectConsent.ts)
+// ---------------------------------------------------------------------------------------------
+
+export type ProjectDecision = 'allowed' | 'denied' | 'unknown';
+
+/**
+ * Whether ExplainIT may explain a project: write twins, auto-open them, backfill, write instruction
+ * files. 'unknown' means the person has not been asked yet for this workspace folder. The checkpoint
+ * (gate) never consults this: it protects every project.
+ */
+export interface ProjectConsent {
+  status(folder: string): ProjectDecision;
+  set(folder: string, decision: 'allowed' | 'denied'): Promise<void>;
+  clear(folder: string): Promise<void>;
+  /** The canonical workspace folder that contains fsPath, if any. */
+  folderFor(fsPath: string, folders: string[]): string | undefined;
+  onDidChange: EventLike<{ folder: string; decision: ProjectDecision }>;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Structure engine (src/structure) — REQ-002, REQ-012
 // ---------------------------------------------------------------------------------------------
 
@@ -334,6 +354,23 @@ export interface AdapterManager {
   states(): Promise<AdapterState[]>;
   /** Absolute path of the installed hook script (for protected-path policy). */
   hookScriptPath(): string;
+  /**
+   * Arm the checkpoint without extra clicks: for every Claude Code / Codex found on this machine whose
+   * hook is not installed, install it. Only acts when the person has granted consent. Never throws.
+   */
+  ensureArmed(): Promise<ArmResult>;
+}
+
+export interface ArmResult {
+  /** Agents whose hook was installed by this call. */
+  armed: AgentKind[];
+  /** Agents that were already armed. */
+  alreadyArmed: AgentKind[];
+  failed: { agent: AgentKind; detail: string }[];
+  /** Plain-English reasons for agents that were skipped (not found, consent missing, Copilot). */
+  skipped: string[];
+  /** Steps the person still has to do (e.g. Codex trust, start a new assistant session). */
+  nextSteps: string[];
 }
 
 export interface CopilotWatcher extends Disposable {
@@ -344,7 +381,7 @@ export interface CopilotWatcher extends Disposable {
 
 export interface InstructionsGenerator {
   /** Writes/updates the ExplainIT sections in CLAUDE.md, AGENTS.md and .github/copilot-instructions.md (idempotent, marker-delimited). */
-  ensure(folder: string, opts?: { agents?: AgentKind[] }): Promise<{ written: string[]; unchanged: string[] }>;
+  ensure(folder: string, opts?: { agents?: AgentKind[] }): Promise<{ written: string[]; unchanged: string[]; excluded?: string[] }>;
   /** The exact section text (pure). */
   sectionText(agent: AgentKind): string;
 }

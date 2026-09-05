@@ -51,6 +51,7 @@ export const COMMAND_IDS = [
   'explainit.openRunbooks',
   'explainit.showStatus',
   'explainit.refreshJournalView',
+  'explainit.projectPermission',
 ] as const;
 
 export type CommandId = (typeof COMMAND_IDS)[number];
@@ -117,6 +118,7 @@ export function registerCommands(ctx: CommandContext): void {
     'explainit.openRunbooks': () => openRunbookIndex(prompter, ux.extensionPath, logger),
     'explainit.showStatus': () => showStatus(ctx),
     'explainit.refreshJournalView': () => refreshJournalView(ctx),
+    'explainit.projectPermission': () => projectPermission(ctx),
   };
   for (const id of COMMAND_IDS) {
     const handler = handlers[id];
@@ -513,6 +515,37 @@ async function offerSharedGitignore(ctx: CommandContext): Promise<void> {
   await ctx.ux.twin.offerSharedGitignore(folder);
 }
 
+const PROJECT_ON = '$(check) Explain this project';
+const PROJECT_OFF = '$(circle-slash) Stop explaining this project';
+
+/** "Allow or stop explanations for this project": shows the current decision and lets the person change it. */
+async function projectPermission(ctx: CommandContext): Promise<void> {
+  const { ux, prompter } = ctx;
+  const folder = await pickFolder(ctx, 'projectPermission.folder');
+  if (!folder) return;
+  const name = path.basename(folder) || folder;
+  const current = ux.projectConsent.status(folder);
+  const currentLine = current === 'allowed' ? 'Explanations are on for this project.' : current === 'denied' ? 'Explanations are off for this project.' : 'ExplainIT has not asked about this project yet.';
+  const picked = await prompter.pick(
+    'projectPermission',
+    [
+      { label: PROJECT_ON, description: current === 'allowed' ? 'current' : '', detail: 'Write a plain-English twin beside each code file you open here, kept out of git.' },
+      { label: PROJECT_OFF, description: current === 'denied' ? 'current' : '', detail: 'No twins, no backfill and no instruction files here. The checkpoint still protects the project.' },
+    ],
+    { placeHolder: currentLine, title: `ExplainIT: ${name}`, testDefault: (items) => items[0] },
+  );
+  if (!picked) return;
+  const allow = picked.label === PROJECT_ON;
+  await ux.projectConsent.set(folder, allow ? 'allowed' : 'denied');
+  void prompter.notify(msg(allow ? 'projectExplainOn' : 'projectExplainOff', { folder: name }), 'info');
+  if (allow) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.scheme === 'file' && editor.document.uri.fsPath.startsWith(folder)) {
+      await ux.twin.ensureTwin(toDocLike(editor.document), { open: true, silent: true }).catch((e) => ctx.logger.warn('twin after allowing the project failed', e));
+    }
+  }
+}
+
 async function updateInstructions(ctx: CommandContext): Promise<void> {
   const folders = ctx.folders();
   if (!folders.length) {
@@ -572,7 +605,7 @@ async function showStatus(ctx: CommandContext): Promise<void> {
   const view = statusBar.current;
   const facts = statusBar.facts;
   const info = ux.gate.info;
-  type Item = vscode.QuickPickItem & { command?: string };
+  type Item = vscode.QuickPickItem & { command?: string; action?: 'arm' };
   const items: Item[] = [
     { label: view.headline, kind: vscode.QuickPickItemKind.Separator },
     { label: `$(shield) Checkpoint: ${view.state.replace('-', ' ')}`, description: info ? `127.0.0.1:${info.port}` : 'not running' },
@@ -580,6 +613,9 @@ async function showStatus(ctx: CommandContext): Promise<void> {
     { label: `$(hubot) Assistants found: ${facts.assistants.length ? facts.assistants.join(', ') : 'none'}`, description: facts.armedAgents.length ? `hooks armed: ${facts.armedAgents.join(', ')}` : 'no hooks armed' },
     { label: `$(bell) ${facts.pending > 0 ? msg('pendingReviews', { count: facts.pending }) : MESSAGES.noPendingReviews}` },
     { label: 'Actions', kind: vscode.QuickPickItemKind.Separator },
+    ...(facts.unarmedAgents.length
+      ? [{ label: `$(shield) Arm the checkpoint now for ${facts.unarmedAgents.map((a) => channelLabel(a)).join(' and ')}`, detail: msg('notArmed', { agents: facts.unarmedAgents.map((a) => channelLabel(a)).join(' and ') }), action: 'arm' as const }]
+      : []),
     view.state === 'paused'
       ? { label: '$(debug-start) Resume the checkpoint', command: 'explainit.resumeCheckpoint' }
       : { label: '$(debug-pause) Pause the checkpoint', command: 'explainit.pauseCheckpoint' },
@@ -590,5 +626,13 @@ async function showStatus(ctx: CommandContext): Promise<void> {
     { label: '$(output) Show logs', command: 'explainit.showLogs' },
   ];
   const picked = await prompter.pick('status', items, { placeHolder: view.headline, title: 'ExplainIT status', testDefault: () => undefined });
+  if (picked?.action === 'arm') {
+    const r = await withTimeout(ux.adapters.ensureArmed(), 60_000, 'arming the checkpoint');
+    if (r.armed.length) void prompter.notify(msg('armedAuto', { agents: r.armed.map((a) => channelLabel(a)).join(' and '), steps: r.nextSteps.map((s, i) => `${i + 1}. ${s}`).join(' ') }), 'info');
+    for (const f of r.failed) void prompter.notify(msg('armFailed', { agent: channelLabel(f.agent), detail: describeError(f.detail) }), 'error');
+    if (!r.armed.length && !r.failed.length) void prompter.notify(r.skipped.join(' ') || 'Nothing to arm.', 'info');
+    await statusBar.refreshFacts();
+    return;
+  }
   if (picked?.command) await vscode.commands.executeCommand(picked.command);
 }

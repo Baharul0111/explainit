@@ -252,6 +252,9 @@ export function fakeAdapters(hookScript: string): AdapterManager {
     async rearm() {
       return { ok: true, checks: [] };
     },
+    async ensureArmed() {
+      return { armed: [], alreadyArmed: [], failed: [], skipped: [], nextSteps: [] };
+    },
     async states() {
       return [];
     },

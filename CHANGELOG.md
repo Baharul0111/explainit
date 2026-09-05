@@ -2,6 +2,15 @@
 
 All notable changes to ExplainIT are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-09-04
+
+### Changed
+
+- **Twins wrap.** `*_explain.txt` files now open with word wrap on (they register as the `explainit-twin` language), so long sentences fold to the editor width instead of scrolling sideways. Explanations themselves are unchanged.
+- **Ask once per project.** Before ExplainIT explains anything in a workspace folder it asks *Explain this project?* and remembers the answer. A refused project gets no twins, no backfill and no instruction files; the checkpoint still protects it. New command **Allow or stop explanations for this project**; new setting `explainit.twin.projectPermission` (`ask` | `always`).
+- **Armed automatically.** After you allow ExplainIT to use your assistants, the checkpoint hook is installed for every Claude Code and Codex found on the machine, at setup and at every start, without a click per assistant. If an assistant is present but not armed, the status bar shows **ExplainIT: not armed** with an **Arm the checkpoint now** action. This closes the gap where a fresh install could leave Claude Code writing unchecked when the setup list was dismissed.
+- **Instruction files stay out of git.** `CLAUDE.md`, `AGENTS.md` and `.github/copilot-instructions.md` that ExplainIT creates are added to the repository's local exclude list, never to the shared `.gitignore`; files your team already had are left alone. New setting `explainit.instructions.keepOutOfGit`.
+
 ## [0.1.0] — 2026-09-02
 
 First public release.

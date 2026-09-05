@@ -38,7 +38,7 @@ export function createUx(deps: UxDeps): UxHandle {
   const folders = (): string[] => (vscode.workspace.workspaceFolders ?? []).map((f) => canonicalPath(f.uri.fsPath));
 
   const virtualDocs = new VirtualDocs(logger, deps.disposables);
-  const statusBar = new StatusBar({ gate: deps.gate, router: deps.router, adapters: deps.adapters, logger, disposables: deps.disposables });
+  const statusBar = new StatusBar({ gate: deps.gate, router: deps.router, adapters: deps.adapters, logger, disposables: deps.disposables, consentGranted: () => deps.consent.granted() });
 
   let lastReport: DoctorReport | undefined;
   let onboardingRun: Promise<void> | undefined;

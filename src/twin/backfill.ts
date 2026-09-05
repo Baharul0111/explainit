@@ -193,9 +193,19 @@ export function createBackfillController(engine: TwinEngineImpl, deps: BackfillD
       return;
     }
     if (state === 'paused' || (await loadPersisted()).length) return resume();
-    const folders = deps.workspaceFolders();
-    if (!folders.length) {
+    const allFolders = deps.workspaceFolders();
+    if (!allFolders.length) {
       notice('warn', 'Open a folder first: backfill explains the code files inside your workspace.');
+      return;
+    }
+    // Per-project permission: folders the person has not decided on are asked now; refused ones are skipped.
+    const folders: string[] = [];
+    for (const f of allFolders) {
+      const s = engine.projectGate.status(f);
+      if (s === 'allowed' || (s === 'unknown' && (await engine.projectGate.ask(f)) === 'allowed')) folders.push(f);
+    }
+    if (!folders.length) {
+      notice('info', 'ExplainIT is turned off for every folder in this workspace. Run "ExplainIT: Allow or stop explanations for this project" to turn it on.');
       return;
     }
     await guardRun(async () => {

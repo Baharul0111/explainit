@@ -37,11 +37,11 @@ async function waitFor(cond: () => boolean, ms = 5000, step = 50): Promise<void>
 suite('ux: commands', function () {
   this.timeout(120_000);
 
-  test('every command from package.json is registered (27)', async () => {
+  test('every command from package.json is registered (28)', async () => {
     await api();
     const registered = new Set(await vscode.commands.getCommands(true));
     const pkgCommands = packageCommands();
-    assert.equal(pkgCommands.length, 27, 'package.json should contribute 27 commands');
+    assert.equal(pkgCommands.length, 28, 'package.json should contribute 28 commands');
     assert.deepEqual([...COMMAND_IDS].sort(), [...pkgCommands].sort(), 'COMMAND_IDS must mirror package.json exactly');
     const missing = pkgCommands.filter((c) => !registered.has(c));
     assert.deepEqual(missing, [], `commands not registered: ${missing.join(', ')}`);

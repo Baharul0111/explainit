@@ -11,7 +11,7 @@
 export const STALE_AFTER_MS = 15_000;
 export const STARTUP_GRACE_MS = 30_000;
 
-export type StatusState = 'armed' | 'paused' | 'not-responding' | 'starting' | 'off';
+export type StatusState = 'armed' | 'unarmed' | 'paused' | 'not-responding' | 'starting' | 'off';
 export type StatusSeverity = 'ok' | 'warning' | 'error';
 
 export interface StatusInputs {
@@ -30,6 +30,8 @@ export interface StatusInputs {
   assistants: string[];
   /** Names of assistants whose checkpoint hook is installed and armed. */
   armedAgents: string[];
+  /** Assistants found on this machine whose hook is NOT armed although permission was given (fresh install). */
+  unarmedAgents?: string[];
   staleAfterMs?: number;
   startupGraceMs?: number;
 }
@@ -52,6 +54,7 @@ export function computeStatus(i: StatusInputs): StatusView {
 
   let state: StatusState;
   if (i.paused) state = 'paused';
+  else if (heartbeatFresh && (i.unarmedAgents?.length ?? 0) > 0) state = 'unarmed';
   else if (heartbeatFresh) state = 'armed';
   else if (inGrace) state = 'starting';
   else if (!i.gateStarted && i.lastHeartbeatMs === undefined) state = 'off';
@@ -71,6 +74,16 @@ export function computeStatus(i: StatusInputs): StatusView {
         headline: 'Checkpoint paused: assistants use their own prompts.',
         tooltip: ['ExplainIT checkpoint is paused. Assistants are using their own prompts.', 'Click for status and actions.', channelLine, assistantsLine].join('\n'),
       };
+    case 'unarmed': {
+      const who = (i.unarmedAgents ?? []).map(channelLabel).join(' and ');
+      return {
+        state,
+        text: '$(shield) ExplainIT: not armed',
+        severity: 'warning',
+        headline: `${who} found, but the checkpoint hook is not armed: changes are not being stopped. Click to arm it.`,
+        tooltip: [`The ExplainIT checkpoint is running, but ${who} can still write without approval because the hook is not installed.`, 'Click and choose "Arm the checkpoint now".', pendingLine, channelLine, assistantsLine, armedLine].join('\n'),
+      };
+    }
     case 'armed':
       return {
         state,

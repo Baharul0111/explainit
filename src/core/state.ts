@@ -12,8 +12,16 @@ export interface ExplainitState {
   onboardingDone?: boolean;
   checkpointPaused?: boolean;
   adapters?: Partial<Record<'claude' | 'codex' | 'copilot', AdapterRecord>>;
+  /** Per-project decisions, keyed by the canonical workspace folder path. */
+  projects?: Record<string, ProjectRecord>;
   channelPin?: string;
   [extra: string]: unknown;
+}
+
+export interface ProjectRecord {
+  /** Whether ExplainIT may write plain-English twins (and instruction files) in this project. */
+  twins: 'allowed' | 'denied';
+  decidedAt: string;
 }
 
 export interface AdapterRecord {

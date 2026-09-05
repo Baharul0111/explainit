@@ -7,7 +7,7 @@
  * Finally marks state.onboardingDone. Test mode auto-answers from EXPLAINIT_TEST_ANSWERS.
  */
 import * as vscode from 'vscode';
-import type { AdapterManager, ConsentStore, CopilotWatcher, GenerationRouter, InstructionsGenerator } from '../core/interfaces';
+import type { AdapterManager, ArmResult, ConsentStore, CopilotWatcher, GenerationRouter, InstructionsGenerator } from '../core/interfaces';
 import type { AgentKind } from '../core/types';
 import type { StateStore } from '../core/state';
 import type { Logger } from '../core/log';
@@ -99,6 +99,31 @@ export async function connectAgent(deps: OnboardingDeps, agent: AgentKind): Prom
   }
 }
 
+/**
+ * Arm the checkpoint for every assistant found, without a click per assistant. A person who dismisses
+ * the setup list on a fresh machine must never be left with an unprotected Claude Code or Codex.
+ */
+export async function autoArm(deps: OnboardingDeps): Promise<ArmResult | undefined> {
+  if (!deps.consent.granted()) return undefined;
+  let result: ArmResult;
+  try {
+    result = await withTimeout(deps.adapters.ensureArmed(), 60_000, 'arming the checkpoint');
+  } catch (e) {
+    deps.logger.warn('automatic arming failed', e);
+    return undefined;
+  }
+  if (result.armed.length) {
+    const steps = result.nextSteps.filter((s) => !/restart/i.test(s));
+    if (result.armed.includes('codex') && !steps.some((s) => /trust/i.test(s))) steps.push(MESSAGES.codexTrustStep);
+    void deps.prompter.notify(msg('armedAuto', { agents: result.armed.map((a) => AGENT_LABEL[a]).join(' and '), steps: steps.map((s, i) => `${i + 1}. ${s}`).join(' ') }), 'info');
+    const folders = deps.folders();
+    for (const f of folders) await deps.instructions.ensure(f, { agents: result.armed }).catch((e) => deps.logger.warn('instructions ensure failed', e));
+  }
+  for (const f of result.failed) void deps.prompter.notify(msg('armFailed', { agent: AGENT_LABEL[f.agent], detail: describeError(f.detail) }), 'error');
+  deps.logger.info(`auto-arm: armed=${result.armed.join(',') || 'none'} already=${result.alreadyArmed.join(',') || 'none'} failed=${result.failed.length}`);
+  return result;
+}
+
 interface ActionItem extends vscode.QuickPickItem {
   action: 'connect' | 'copilot' | 'link' | 'again' | 'done';
   agent?: AgentKind;
@@ -144,8 +169,12 @@ export async function runOnboarding(deps: OnboardingDeps, opts: { force?: boolea
     return;
   }
 
+  // Arm first, ask questions second: every Claude Code / Codex found gets its hook now, so nothing
+  // depends on the person picking the right item in the list below.
+  const auto = await autoArm(deps);
+
   // Steps 2-4 loop: detect, offer one-click connects, or guidance + "Check again".
-  const connected = new Set<AgentKind>();
+  const connected = new Set<AgentKind>([...(auto?.armed ?? []), ...(auto?.alreadyArmed ?? [])]);
   // Agents we already tried this run (success or failure): test mode must never retry a failing install
   // ten times, and a person who saw the failure message is not re-offered the same click by default.
   const attempted = new Set<AgentKind>();

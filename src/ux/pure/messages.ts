@@ -52,6 +52,12 @@ export const MESSAGES = {
   regenerateDone: 'Section {index} was regenerated.',
   autoOpenOn: 'ExplainIT will open the plain-English twin beside every code file you open.',
   autoOpenOff: 'Automatic twin opening is off. Use "ExplainIT: Open plain-English twin" whenever you want one.',
+  projectExplainOn: 'ExplainIT will explain the code in {folder}: a plain-English twin opens beside each code file.',
+  projectExplainOff: 'ExplainIT will not explain {folder}. The checkpoint still protects it. Change this any time with "ExplainIT: Allow or stop explanations for this project".',
+  projectNotAsked: 'ExplainIT has not asked about {folder} yet; it will ask when you open a code file there.',
+  armedAuto: 'ExplainIT armed the checkpoint for {agents}. Start a new conversation in the assistant so it takes effect. {steps}',
+  armFailed: 'ExplainIT could not arm the checkpoint for {agent}: {detail} Run "ExplainIT: Doctor" for a fix.',
+  notArmed: 'The checkpoint is not armed for {agents}, so their changes are not being stopped. Choose "Arm the checkpoint now".',
 
   // --- backfill ------------------------------------------------------------------------------
   backfillNothingToDo: 'Every code file in this project already has an up-to-date twin. There is nothing to backfill.',

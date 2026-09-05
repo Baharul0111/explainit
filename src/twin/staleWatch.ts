@@ -21,6 +21,7 @@ export function registerStaleWatch(engine: TwinEngineImpl, deps: { settings: Set
   const run = async (doc: vscode.TextDocument): Promise<void> => {
     if (doc.isClosed || !deps.settings.get('stalenessMarks')) return;
     const key = canonicalPath(doc.uri.fsPath);
+    if (engine.projectGate.status(key) !== 'allowed') return; // a project that was not allowed has no twins to mark
     if (landedRecently(key)) return; // the gate just wrote this file and will refresh the twin itself
     if (!(await engine.hasTwin(key))) return;
     await engine.markStaleDoc(toDocLike(doc));
