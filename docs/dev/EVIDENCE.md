@@ -47,7 +47,7 @@ Verified 2026-09-03 21:16 IST: the public gallery query for "ExplainIT" lists `B
 | Checkpoint armed automatically on a fresh machine | `src/adapters/arm.ts` + `test/unit/adapters/ensureArmed.test.ts` (no consent: nothing; consent: every assistant found is armed into a temp user home, second call finds it armed); status bar `unarmed` state in `test/unit/ux/statusUnarmed.test.ts`; called at every activation and from onboarding |
 | Instruction files ExplainIT creates stay out of git | `test/unit/core/gitExcludeFile.test.ts`, `test/unit/instructions/exclude.test.ts` (created files excluded locally, team files untouched, setting turns it off) |
 
-Local runs on 2026-09-05: 1084 unit, 36 hook conformance, 103 VS Code integration, install smoke PASS (26 checks) against `explainit-code-0.2.0.vsix`.
+Local runs on 2026-09-05: 1084 unit, 36 hook conformance, 103 VS Code integration, install smoke PASS (26 checks) against `explainit-code-0.2.0.vsix`. CI run https://github.com/Baharul0111/explainit/actions/runs/33971265987 green on ubuntu, windows and macos. Published 2026-09-05 19:52 IST as `BaharulIslam.explainit-code` v0.2.0; the public gallery served 0.2.0 by 19:56 and a fresh VS Code profile installed `baharulislam.explainit-code@0.2.0` from the Marketplace.
 
 ## Manual step that remains with Baharul
 
