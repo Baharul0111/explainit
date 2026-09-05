@@ -3,6 +3,7 @@
  * active editor, when `twin.autoOpen` is on. Debounced per file; never opens twins for twins, and never
  * for a code file that was opened INTO the twin column while another column shows code (ping-pong guard).
  */
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import type { Logger } from '../core/log';
 import type { Settings } from '../core/settings';
@@ -76,6 +77,9 @@ export function registerAutoOpen(engine: TwinEngineImpl, deps: { settings: Setti
     vscode.workspace.onDidCloseTextDocument((doc) => {
       if (doc.uri.scheme !== 'file') return;
       if (isTwinPath(doc.uri.fsPath)) {
+        // A twin that vanished from disk was deleted, not closed by the person: opening the code again
+        // should bring a fresh twin back.
+        if (!fs.existsSync(doc.uri.fsPath)) return;
         void engine.sourceForTwin(doc.uri.fsPath).then((src) => src && closedByUser.add(src));
       } else {
         closedByUser.delete(canonicalPath(doc.uri.fsPath)); // closing the source re-arms auto-open too

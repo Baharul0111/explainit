@@ -61,13 +61,21 @@ suite('twin engine (integration): per-project permission', function () {
   test('a project nobody decided on yet is asked once; the answer is remembered', async () => {
     await api.projectConsent.clear(folder);
     assert.strictEqual(api.projectConsent.status(folder), 'unknown');
-    const src = path.join(workspaceRoot(), 'pkg', 'main.go');
-    const twin = path.join(workspaceRoot(), 'pkg', 'main_explain.txt');
-    const doc = await vscode.workspace.openTextDocument(src);
-    await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
-    // Test mode answers the question with "Explain this project" unless EXPLAINIT_TEST_ANSWERS says otherwise.
-    await waitFor(() => api.projectConsent.status(folder) === 'allowed', 15_000, 'the project decision to be recorded');
-    await waitFor(() => fs.existsSync(twin), 20_000, 'twin after the question was answered');
+    // A file no other suite touches, so earlier opens, closes or deleted twins cannot colour this test.
+    const src = path.join(workspaceRoot(), 'pkg', 'permission_probe.py');
+    const twin = path.join(workspaceRoot(), 'pkg', 'permission_probe_explain.txt');
+    fs.writeFileSync(src, 'def probe(value):\n    """Return the value doubled."""\n    return value * 2\n');
+    try {
+      const doc = await vscode.workspace.openTextDocument(src);
+      await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+      // Test mode answers the question with "Explain this project" unless EXPLAINIT_TEST_ANSWERS says otherwise.
+      await waitFor(() => api.projectConsent.status(folder) === 'allowed', 15_000, 'the project decision to be recorded');
+      await waitFor(() => fs.existsSync(twin), 20_000, 'twin after the question was answered');
+    } finally {
+      await closeAllEditors();
+      fs.rmSync(src, { force: true });
+      fs.rmSync(twin, { force: true });
+    }
   });
 
   test('the command changes the decision and reports it', async () => {
